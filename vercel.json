@@ -13,3 +13,9 @@
     }
   ]
 }
+
+{
+  "rewrites": [
+    { "source": "/lifafa/:code", "destination": "/lifafa/[code].html" }
+  ]
+}
