@@ -1050,6 +1050,130 @@ app.get('/api/admin/logs', adminMiddleware, async (req, res) => {
     }
 });
 
+// ==================== ADMIN - LIFAFA OVER & REFUND ====================
+
+// Get all lifafas (Admin)
+app.get('/api/admin/all-lifafas', adminMiddleware, async (req, res) => {
+    try {
+        const lifafas = await Lifafa.find()
+            .populate('createdBy', 'username number')
+            .sort('-createdAt');
+        
+        res.json({ success: true, lifafas });
+    } catch(err) {
+        res.json({ success: false, msg: 'Error loading lifafas' });
+    }
+});
+
+// Mark lifafa as over and refund remaining amount
+app.post('/api/admin/lifafa-over', adminMiddleware, async (req, res) => {
+    try {
+        const { lifafaId, reason } = req.body;
+        
+        if (!lifafaId) {
+            return res.json({ success: false, msg: 'Lifafa ID required' });
+        }
+        
+        const lifafa = await Lifafa.findById(lifafaId).populate('createdBy');
+        
+        if (!lifafa) {
+            return res.json({ success: false, msg: 'Lifafa not found' });
+        }
+        
+        if (!lifafa.isActive) {
+            return res.json({ success: false, msg: 'Lifafa is already over' });
+        }
+        
+        // Calculate remaining amount
+        const totalUsers = lifafa.numbers?.length || 1;
+        const claimedUsers = lifafa.claimedCount || 0;
+        const remainingUsers = totalUsers - claimedUsers;
+        const remainingAmount = lifafa.amount * remainingUsers;
+        
+        // If lifafa was created by user, refund remaining amount
+        if (lifafa.createdBy && remainingAmount > 0) {
+            lifafa.createdBy.balance += remainingAmount;
+            await lifafa.createdBy.save();
+            
+            // Create transaction for refund
+            await new Transaction({
+                userId: lifafa.createdBy._id,
+                type: 'credit',
+                amount: remainingAmount,
+                description: `Refund for lifafa: ${lifafa.title} (${remainingUsers} unclaimed)`
+            }).save();
+            
+            // Send Telegram notification
+            await telegram.sendMessage(lifafa.createdBy.telegramUid,
+                `💰 *Lifafa Refund*\n\n` +
+                `Your lifafa "${lifafa.title}" has been marked as over.\n` +
+                `Remaining amount: ₹${remainingAmount} (${remainingUsers} unclaimed users)\n` +
+                `has been refunded to your balance.`,
+                { parse_mode: 'Markdown' }
+            );
+        }
+        
+        // Mark lifafa as inactive
+        lifafa.isActive = false;
+        await lifafa.save();
+        
+        // Log admin action
+        await new Transaction({
+            userId: req.adminId,
+            type: 'debit',
+            amount: remainingAmount,
+            description: `Admin marked lifafa over: ${lifafa.title} (Refund: ₹${remainingAmount})`
+        }).save();
+        
+        res.json({ 
+            success: true, 
+            msg: 'Lifafa marked as over',
+            remainingUsers,
+            remainingAmount,
+            refunded: remainingAmount > 0
+        });
+        
+    } catch(err) {
+        console.error('Lifafa over error:', err);
+        res.json({ success: false, msg: 'Operation failed' });
+    }
+});
+
+// Get lifafa details by ID (Admin)
+app.get('/api/admin/lifafa/:id', adminMiddleware, async (req, res) => {
+    try {
+        const lifafa = await Lifafa.findById(req.params.id)
+            .populate('createdBy', 'username number telegramUid balance')
+            .populate('claimedBy', 'username number');
+        
+        if (!lifafa) {
+            return res.json({ success: false, msg: 'Lifafa not found' });
+        }
+        
+        const totalUsers = lifafa.numbers?.length || 1;
+        const claimedUsers = lifafa.claimedCount || 0;
+        const remainingUsers = totalUsers - claimedUsers;
+        const remainingAmount = lifafa.amount * remainingUsers;
+        
+        res.json({
+            success: true,
+            lifafa: {
+                ...lifafa.toObject(),
+                stats: {
+                    totalUsers,
+                    claimedUsers,
+                    remainingUsers,
+                    totalAmount: lifafa.amount * totalUsers,
+                    claimedAmount: lifafa.amount * claimedUsers,
+                    remainingAmount
+                }
+            }
+        });
+    } catch(err) {
+        res.json({ success: false, msg: 'Error loading lifafa' });
+    }
+});
+
 // ==================== START SERVER ====================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
