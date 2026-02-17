@@ -1197,6 +1197,122 @@ app.get('/api/admin/lifafa/:id', adminMiddleware, async (req, res) => {
     }
 });
 
+// ==================== ADMIN - DELETE USER ====================
+app.post('/api/admin/delete-user', adminMiddleware, async (req, res) => {
+    try {
+        const { userId, number, reason } = req.body;
+        
+        if (!userId || !number || !reason) {
+            return res.json({ success: false, msg: 'User ID, number and reason required' });
+        }
+        
+        // Find user
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.json({ success: false, msg: 'User not found' });
+        }
+        
+        // Check if user has balance
+        if (user.balance > 0) {
+            return res.json({ success: false, msg: 'Cannot delete user with balance > 0. Refund first.' });
+        }
+        
+        // Delete user's transactions
+        await Transaction.deleteMany({ userId: user._id });
+        
+        // Delete user's withdrawals
+        await Withdrawal.deleteMany({ userId: user._id });
+        
+        // Delete user's lifafas (created)
+        await Lifafa.deleteMany({ createdBy: user._id });
+        
+        // Remove user from claimedBy in lifafas
+        await Lifafa.updateMany(
+            { claimedBy: user._id },
+            { $pull: { claimedBy: user._id } }
+        );
+        
+        // Finally delete the user
+        await User.findByIdAndDelete(userId);
+        
+        // Log admin action
+        await new Transaction({
+            userId: req.adminId,
+            type: 'debit',
+            amount: 0,
+            description: `Admin deleted user: ${number} (${reason})`
+        }).save();
+        
+        // Send notification to user's Telegram if possible
+        try {
+            await telegram.sendMessage(user.telegramUid,
+                `🚫 *Account Deleted*\n\nYour account has been deleted by admin.\nReason: ${reason}`,
+                { parse_mode: 'Markdown' }
+            );
+        } catch(err) {}
+        
+        res.json({ success: true, msg: 'User deleted successfully' });
+        
+    } catch(err) {
+        console.error('Delete user error:', err);
+        res.json({ success: false, msg: 'Failed to delete user' });
+    }
+});
+
+// ==================== ADMIN - DELETE LIFAFA ====================
+app.post('/api/admin/delete-lifafa', adminMiddleware, async (req, res) => {
+    try {
+        const { lifafaId, reason } = req.body;
+        
+        if (!lifafaId || !reason) {
+            return res.json({ success: false, msg: 'Lifafa ID and reason required' });
+        }
+        
+        const lifafa = await Lifafa.findById(lifafaId).populate('createdBy');
+        
+        if (!lifafa) {
+            return res.json({ success: false, msg: 'Lifafa not found' });
+        }
+        
+        // If lifafa is active and has unclaimed amount, refund to creator
+        if (lifafa.isActive && lifafa.createdBy) {
+            const totalUsers = lifafa.numbers?.length || 1;
+            const claimedUsers = lifafa.claimedCount || 0;
+            const remainingUsers = totalUsers - claimedUsers;
+            const remainingAmount = lifafa.amount * remainingUsers;
+            
+            if (remainingAmount > 0) {
+                lifafa.createdBy.balance += remainingAmount;
+                await lifafa.createdBy.save();
+                
+                await new Transaction({
+                    userId: lifafa.createdBy._id,
+                    type: 'credit',
+                    amount: remainingAmount,
+                    description: `Refund for deleted lifafa: ${lifafa.title}`
+                }).save();
+            }
+        }
+        
+        // Delete the lifafa
+        await Lifafa.findByIdAndDelete(lifafaId);
+        
+        // Log admin action
+        await new Transaction({
+            userId: req.adminId,
+            type: 'debit',
+            amount: 0,
+            description: `Admin deleted lifafa: ${lifafa.title} (${reason})`
+        }).save();
+        
+        res.json({ success: true, msg: 'Lifafa deleted successfully' });
+        
+    } catch(err) {
+        console.error('Delete lifafa error:', err);
+        res.json({ success: false, msg: 'Failed to delete lifafa' });
+    }
+});
+
 // ==================== START SERVER ====================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
