@@ -625,7 +625,7 @@ app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
             description: `Created Lifafa: ${title} (${totalUsers} users)`
         }).save();
         
-        const shareableLink = `${process.env.FRONTEND_URL}/lifafa/${lifafaCode}`;
+        const shareableLink = `${process.env.FRONTEND_URL}/claimlifafa.html?code=${lifafaCode}`;
         
         await telegram.sendMessage(user.telegramUid,
             `🎁 *Lifafa Created!*\n\n*Title:* ${title}\n*Amount:* ₹${amount} × ${totalUsers} users\n*Total Cost:* ₹${totalCost}\n*Code:* \`${lifafaCode}\`\n*Link:* ${shareableLink}`,
