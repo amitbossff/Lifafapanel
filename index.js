@@ -397,8 +397,11 @@ app.get('/api/user/dashboard', authMiddleware, async (req, res) => {
         // Sirf private lifafas count karo jinka number match karta ho
         const unclaimedCount = await Lifafa.countDocuments({
             isActive: true,
-            numbers: user.number,
-            numbers: { $ne: [] },
+            $and: [
+                { numbers: user.number },
+                { numbers: { $ne: [] } },
+                { numbers: { $exists: true } }
+            ],
             claimedNumbers: { $ne: user.number }
         });
         
@@ -686,7 +689,7 @@ app.get('/api/user/my-lifafas', authMiddleware, async (req, res) => {
     }
 });
 
-// ==================== GET UNCLAIMED LIFAFAS FOR USER - FIXED ====================
+// ==================== GET UNCLAIMED LIFAFAS FOR USER - FINAL FIX WITH $AND ====================
 app.post('/api/user/unclaimed-lifafas', authMiddleware, async (req, res) => {
     try {
         const { number } = req.body;
@@ -696,14 +699,19 @@ app.post('/api/user/unclaimed-lifafas', authMiddleware, async (req, res) => {
             return res.json({ success: false, msg: 'Invalid number' });
         }
         
-        // FIXED: Sirf wahi lifafas jinka numbers array mein user ka number ho
-        // AND numbers array empty na ho (private lifafas)
+        // FINAL FIX: $and operator use karo for multiple conditions
         const lifafas = await Lifafa.find({
             isActive: true,
-            numbers: number,           // User ka number array mein hona chahiye
-            numbers: { $ne: [] },      // Array empty nahi hona chahiye
+            $and: [
+                { numbers: number },              // User ka number array mein ho
+                { numbers: { $ne: [] } },          // Array empty na ho
+                { numbers: { $exists: true } }      // Array exist karta ho
+            ],
             claimedNumbers: { $ne: number }
         }).sort('-createdAt');
+        
+        // Debug log - remove in production
+        console.log(`📊 User ${number} ke liye ${lifafas.length} private lifafas mile`);
         
         res.json({ 
             success: true,
@@ -720,12 +728,12 @@ app.post('/api/user/unclaimed-lifafas', authMiddleware, async (req, res) => {
         });
         
     } catch(err) {
-        console.error('Unclaimed lifafas error:', err);
+        console.error('❌ Unclaimed lifafas error:', err);
         res.json({ success: false, msg: 'Failed to fetch lifafas' });
     }
 });
 
-// ==================== CLAIM LIFAFA - FIXED ====================
+// ==================== CLAIM LIFAFA ====================
 app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
     try {
         const { code } = req.body;
@@ -734,7 +742,7 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
         const lifafa = await Lifafa.findOne({ code, isActive: true });
         if (!lifafa) return res.json({ success: false, msg: 'Invalid code' });
         
-        // FIXED: Agar private lifafa hai to strictly number check karo
+        // Check if private lifafa and user is eligible
         if (lifafa.numbers && lifafa.numbers.length > 0) {
             if (!lifafa.numbers.includes(user.number)) {
                 return res.json({ 
@@ -785,7 +793,7 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
     }
 });
 
-// ==================== CLAIM ALL PRIVATE LIFAFAS - FIXED ====================
+// ==================== CLAIM ALL PRIVATE LIFAFAS - FINAL FIX WITH $AND ====================
 app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
     try {
         const { number } = req.body;
@@ -795,11 +803,14 @@ app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
             return res.json({ success: false, msg: 'Invalid number' });
         }
         
-        // FIXED: Sirf wahi private lifafas jinka number match karta ho
+        // Same $and condition use karo
         const lifafas = await Lifafa.find({
             isActive: true,
-            numbers: number,           // User ka number array mein hona chahiye
-            numbers: { $ne: [] },      // Array empty nahi hona chahiye
+            $and: [
+                { numbers: number },
+                { numbers: { $ne: [] } },
+                { numbers: { $exists: true } }
+            ],
             claimedNumbers: { $ne: number }
         });
         
@@ -851,7 +862,7 @@ app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
         });
         
     } catch(err) {
-        console.error('Claim all error:', err);
+        console.error('❌ Claim all error:', err);
         res.json({ success: false, msg: 'Failed to claim all' });
     }
 });
@@ -899,7 +910,7 @@ app.get('/api/lifafa/:code', async (req, res) => {
     }
 });
 
-// ==================== PUBLIC LIFAFA CLAIM - FIXED ====================
+// ==================== PUBLIC LIFAFA CLAIM ====================
 app.post('/api/lifafa/claim', async (req, res) => {
     try {
         const { code, number } = req.body;
@@ -911,7 +922,7 @@ app.post('/api/lifafa/claim', async (req, res) => {
         const lifafa = await Lifafa.findOne({ code, isActive: true });
         if (!lifafa) return res.json({ success: false, msg: 'Invalid code' });
         
-        // FIXED: Private lifafa ko public claim se rokna
+        // Private lifafa ko public claim se rokna
         if (lifafa.numbers && lifafa.numbers.length > 0) {
             return res.json({ 
                 success: false, 
