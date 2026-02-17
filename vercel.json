@@ -16,6 +16,6 @@
 
 {
   "rewrites": [
-    { "source": "/lifafa/:code", "destination": "/lifafa/[code].html" }
+    { "source": "/claimlifafa/:code", "destination": "/claimlifafa.html" }
   ]
 }
