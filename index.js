@@ -48,8 +48,8 @@ const LifafaSchema = new mongoose.Schema({
     title: { type: String, required: true },
     code: { type: String, required: true, unique: true },
     amount: { type: Number, required: true },
-    numbers: [{ type: String }],
-    totalUsers: { type: Number, default: 1 }, // For limited public lifafas (1 = unlimited)
+    numbers: [{ type: String }], // Specific numbers for private lifafas
+    totalUsers: { type: Number, default: 1 }, // For limited public lifafas (1 = unlimited/public)
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     createdByNumber: String,
     isUserCreated: { type: Boolean, default: true },
@@ -396,10 +396,8 @@ app.get('/api/user/dashboard', authMiddleware, async (req, res) => {
         
         const unclaimedCount = await Lifafa.countDocuments({
             isActive: true,
-            $or: [
-                { numbers: user.number, numbers: { $ne: [] } },
-                { numbers: { $size: 0 }, totalUsers: 1 }
-            ],
+            numbers: user.number, // Sirf private lifafas jisme user ka number ho
+            numbers: { $ne: [] },
             claimedNumbers: { $ne: user.number }
         });
         
@@ -566,7 +564,7 @@ app.get('/api/user/withdrawals', authMiddleware, async (req, res) => {
     }
 });
 
-// ==================== CREATE LIFAFA (USER) - FIXED ====================
+// ==================== CREATE LIFAFA (USER) ====================
 app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
     try {
         const { title, amount, code, numbers, userCount, channel } = req.body;
@@ -592,19 +590,24 @@ app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
         
         // Calculate total users correctly
         let totalUsers = 1; // Default for public unlimited
+        let lifafaType = 'public_unlimited';
         
         if (allowedNumbers.length > 0) {
-            // Option 1: Code from Number Tool (specific numbers)
+            // Option 1: Code from Number Tool (private - specific numbers)
             totalUsers = allowedNumbers.length;
+            lifafaType = 'private';
         } else if (userCount && parseInt(userCount) > 0) {
-            // Option 2: Manual user count (limited public lifafa)
+            // Option 2: Public Limited (sirf link se claim)
             totalUsers = parseInt(userCount);
+            lifafaType = 'public_limited';
         } else if (numbers && numbers.trim()) {
-            // Option 3: Manual numbers entered
+            // Option 3: Private Manual (specific numbers)
             const manualNumbers = numbers.split('\n').filter(n => n.trim());
+            allowedNumbers = manualNumbers;
             totalUsers = manualNumbers.length;
+            lifafaType = 'private';
         }
-        // else: totalUsers = 1 (public unlimited - anyone can claim once, unlimited spots)
+        // else: Option 4: Public Unlimited (sirf link se claim)
         
         const totalCost = amount * totalUsers;
         
@@ -637,16 +640,23 @@ app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
             userId: user._id,
             type: 'debit',
             amount: totalCost,
-            description: `Created Lifafa: ${title} (${totalUsers} users)`
+            description: `Created ${lifafaType} Lifafa: ${title} (${totalUsers} users)`
         }).save();
         
         const baseUrl = process.env.FRONTEND_URL || 'https://muskilxlifafa.vercel.app';
         const shareableLink = `${baseUrl}/claimlifafa.html?code=${lifafaCode}`;
         
-        await telegram.sendMessage(user.telegramUid,
-            `🎁 *Lifafa Created!*\n\n*Title:* ${title}\n*Amount:* ₹${amount} × ${totalUsers === 1 ? 'Unlimited' : totalUsers} users\n*Total Cost:* ₹${totalCost}\n*Code:* \`${lifafaCode}\`\n*Link:* ${shareableLink}`,
-            { parse_mode: 'Markdown' }
-        );
+        let message = `🎁 *Lifafa Created!*\n\n*Title:* ${title}\n*Amount:* ₹${amount}`;
+        if (lifafaType === 'private') {
+            message += `\n*Type:* Private (${totalUsers} specific users)`;
+        } else if (lifafaType === 'public_limited') {
+            message += `\n*Type:* Public Limited (${totalUsers} spots)`;
+        } else {
+            message += `\n*Type:* Public Unlimited`;
+        }
+        message += `\n*Total Cost:* ₹${totalCost}\n*Code:* \`${lifafaCode}\`\n*Link:* ${shareableLink}`;
+        
+        await telegram.sendMessage(user.telegramUid, message, { parse_mode: 'Markdown' });
         
         res.json({ 
             success: true, 
@@ -655,7 +665,8 @@ app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
             link: shareableLink,
             totalUsers,
             totalCost,
-            newBalance: user.balance
+            newBalance: user.balance,
+            type: lifafaType
         });
         
     } catch(err) {
@@ -683,27 +694,12 @@ app.post('/api/user/unclaimed-lifafas', authMiddleware, async (req, res) => {
             return res.json({ success: false, msg: 'Invalid number' });
         }
         
-        // Sirf wahi lifafas dikhao jo:
-        // 1. Active hain
-        // 2. User ne claim nahi kiya
-        // 3. Ya to user ka number specific list mein ho (private), YA
-        // 4. Public unlimited ho (numbers empty, totalUsers = 1)
-        // 5. Public limited wale (totalUsers > 1) NAHI DIKHANE
-        
+        // Sirf PRIVATE lifafas dikhao - jisme user ka number specifically added ho
         const lifafas = await Lifafa.find({
             isActive: true,
-            claimedNumbers: { $ne: number },
-            $or: [
-                // Private lifafas - jinka number specifically add kiya gaya hai
-                { numbers: number, numbers: { $ne: [] } },
-                
-                // Public unlimited lifafas - jisme koi bhi claim kar sakta hai, unlimited
-                { 
-                    numbers: { $size: 0 }, 
-                    totalUsers: 1
-                }
-                // Public limited (totalUsers > 1) - NAHI DIKHAENGE
-            ]
+            numbers: number, // User ka number specifically added hona chahiye
+            numbers: { $ne: [] }, // Empty array nahi hona chahiye
+            claimedNumbers: { $ne: number }
         }).sort('-createdAt');
         
         res.json({ 
@@ -714,7 +710,7 @@ app.post('/api/user/unclaimed-lifafas', authMiddleware, async (req, res) => {
                 amount: l.amount,
                 code: l.code,
                 channel: l.channel,
-                isPublic: l.numbers.length === 0,
+                isPublic: false, // Private lifafa
                 totalUsers: l.totalUsers || 1,
                 claimedCount: l.claimedCount || 0
             }))
@@ -734,12 +730,13 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
         const lifafa = await Lifafa.findOne({ code, isActive: true });
         if (!lifafa) return res.json({ success: false, msg: 'Invalid code' });
         
-        // Check eligibility
+        // Check eligibility - sirf private lifafas ke liye number check
         if (lifafa.numbers && lifafa.numbers.length > 0) {
             if (!lifafa.numbers.includes(user.number)) {
-                return res.json({ success: false, msg: 'Not eligible' });
+                return res.json({ success: false, msg: 'You are not eligible for this lifafa' });
             }
         }
+        // Public lifafas (limited/unlimited) ke liye koi number check nahi
         
         if (lifafa.claimedNumbers && lifafa.claimedNumbers.includes(user.number)) {
             return res.json({ success: false, msg: 'Already claimed' });
@@ -791,17 +788,16 @@ app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
             return res.json({ success: false, msg: 'Invalid number' });
         }
         
+        // Sirf private lifafas claim all mein aayenge
         const lifafas = await Lifafa.find({
             isActive: true,
-            $or: [
-                { numbers: number },
-                { numbers: { $size: 0 }, totalUsers: 1 }
-            ],
+            numbers: number,
+            numbers: { $ne: [] },
             claimedNumbers: { $ne: number }
         });
         
         if (lifafas.length === 0) {
-            return res.json({ success: false, msg: 'No unclaimed lifafas' });
+            return res.json({ success: false, msg: 'No unclaimed private lifafas' });
         }
         
         let totalAmount = 0;
@@ -822,11 +818,11 @@ app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
             userId: user._id,
             type: 'credit',
             amount: totalAmount,
-            description: `Bulk claimed ${lifafas.length} lifafas`
+            description: `Bulk claimed ${lifafas.length} private lifafas`
         }).save();
         
         await telegram.sendMessage(user.telegramUid,
-            `🎊 *Bulk Claim Successful!*\n\n*Total Lifafas:* ${lifafas.length}\n*Total Amount:* +₹${totalAmount}\n*New Balance:* ₹${user.balance}`,
+            `🎊 *Bulk Claim Successful!*\n\n*Total Private Lifafas:* ${lifafas.length}\n*Total Amount:* +₹${totalAmount}\n*New Balance:* ₹${user.balance}`,
             { parse_mode: 'Markdown' }
         );
         
@@ -847,6 +843,14 @@ app.get('/api/lifafa/:code', async (req, res) => {
         
         if (!lifafa) return res.json({ success: false, msg: 'Lifafa not found' });
         
+        // Determine lifafa type
+        let type = 'public_unlimited';
+        if (lifafa.numbers && lifafa.numbers.length > 0) {
+            type = 'private';
+        } else if (lifafa.totalUsers > 1) {
+            type = 'public_limited';
+        }
+        
         res.json({
             success: true,
             lifafa: {
@@ -856,7 +860,7 @@ app.get('/api/lifafa/:code', async (req, res) => {
                 channel: lifafa.channel,
                 numbers: lifafa.numbers,
                 totalUsers: lifafa.totalUsers || 1,
-                isPublic: lifafa.numbers.length === 0,
+                type: type,
                 createdBy: lifafa.createdBy ? {
                     username: lifafa.createdBy.username,
                     number: lifafa.createdBy.number
@@ -883,12 +887,13 @@ app.post('/api/lifafa/claim', async (req, res) => {
         const lifafa = await Lifafa.findOne({ code, isActive: true });
         if (!lifafa) return res.json({ success: false, msg: 'Invalid code' });
         
-        // Check eligibility
+        // Check eligibility for private lifafa
         if (lifafa.numbers && lifafa.numbers.length > 0) {
             if (!lifafa.numbers.includes(number)) {
-                return res.json({ success: false, msg: 'Not eligible' });
+                return res.json({ success: false, msg: 'You are not eligible for this lifafa' });
             }
         }
+        // Public lifafas (limited/unlimited) - koi eligibility check nahi
         
         if (lifafa.claimedNumbers && lifafa.claimedNumbers.includes(number)) {
             return res.json({ success: false, msg: 'Already claimed' });
@@ -897,6 +902,8 @@ app.post('/api/lifafa/claim', async (req, res) => {
         // Check if limit reached
         const totalAllowed = lifafa.totalUsers || lifafa.numbers?.length || 999999;
         if (lifafa.claimedCount >= totalAllowed) {
+            lifafa.isActive = false;
+            await lifafa.save();
             return res.json({ success: false, msg: 'This lifafa is fully claimed' });
         }
         
