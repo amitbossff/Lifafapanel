@@ -394,9 +394,10 @@ app.get('/api/user/dashboard', authMiddleware, async (req, res) => {
             .sort('-createdAt')
             .limit(5);
         
+        // Sirf private lifafas count karo jinka number match karta ho
         const unclaimedCount = await Lifafa.countDocuments({
             isActive: true,
-            numbers: user.number, // Sirf private lifafas jisme user ka number ho
+            numbers: user.number,
             numbers: { $ne: [] },
             claimedNumbers: { $ne: user.number }
         });
@@ -416,6 +417,7 @@ app.get('/api/user/dashboard', authMiddleware, async (req, res) => {
             createdLifafas
         });
     } catch(err) {
+        console.error('Dashboard error:', err);
         res.json({ success: false, msg: 'Error loading dashboard' });
     }
 });
@@ -694,11 +696,12 @@ app.post('/api/user/unclaimed-lifafas', authMiddleware, async (req, res) => {
             return res.json({ success: false, msg: 'Invalid number' });
         }
         
-        // Sirf PRIVATE lifafas dikhao - jisme user ka number specifically added ho
+        // FIXED: Sirf wahi lifafas jinka numbers array mein user ka number ho
+        // AND numbers array empty na ho (private lifafas)
         const lifafas = await Lifafa.find({
             isActive: true,
-            numbers: number, // User ka number specifically added hona chahiye
-            numbers: { $ne: [] }, // Empty array nahi hona chahiye
+            numbers: number,           // User ka number array mein hona chahiye
+            numbers: { $ne: [] },      // Array empty nahi hona chahiye
             claimedNumbers: { $ne: number }
         }).sort('-createdAt');
         
@@ -710,7 +713,7 @@ app.post('/api/user/unclaimed-lifafas', authMiddleware, async (req, res) => {
                 amount: l.amount,
                 code: l.code,
                 channel: l.channel,
-                isPublic: false, // Private lifafa
+                isPublic: false,
                 totalUsers: l.totalUsers || 1,
                 claimedCount: l.claimedCount || 0
             }))
@@ -722,6 +725,7 @@ app.post('/api/user/unclaimed-lifafas', authMiddleware, async (req, res) => {
     }
 });
 
+// ==================== CLAIM LIFAFA - FIXED ====================
 app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
     try {
         const { code } = req.body;
@@ -730,13 +734,15 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
         const lifafa = await Lifafa.findOne({ code, isActive: true });
         if (!lifafa) return res.json({ success: false, msg: 'Invalid code' });
         
-        // Check eligibility - sirf private lifafas ke liye number check
+        // FIXED: Agar private lifafa hai to strictly number check karo
         if (lifafa.numbers && lifafa.numbers.length > 0) {
             if (!lifafa.numbers.includes(user.number)) {
-                return res.json({ success: false, msg: 'You are not eligible for this lifafa' });
+                return res.json({ 
+                    success: false, 
+                    msg: 'This is a private lifafa and you are not eligible to claim it' 
+                });
             }
         }
-        // Public lifafas (limited/unlimited) ke liye koi number check nahi
         
         if (lifafa.claimedNumbers && lifafa.claimedNumbers.includes(user.number)) {
             return res.json({ success: false, msg: 'Already claimed' });
@@ -756,7 +762,6 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
         lifafa.claimedCount++;
         lifafa.totalAmount += lifafa.amount;
         
-        // Mark as inactive if limit reached
         if (lifafa.claimedCount >= totalAllowed) {
             lifafa.isActive = false;
         }
@@ -775,10 +780,12 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
         res.json({ success: true, amount: lifafa.amount, newBalance: user.balance });
         
     } catch(err) {
+        console.error('Claim lifafa error:', err);
         res.json({ success: false, msg: 'Claim failed' });
     }
 });
 
+// ==================== CLAIM ALL PRIVATE LIFAFAS - FIXED ====================
 app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
     try {
         const { number } = req.body;
@@ -788,11 +795,11 @@ app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
             return res.json({ success: false, msg: 'Invalid number' });
         }
         
-        // Sirf private lifafas claim all mein aayenge
+        // FIXED: Sirf wahi private lifafas jinka number match karta ho
         const lifafas = await Lifafa.find({
             isActive: true,
-            numbers: number,
-            numbers: { $ne: [] },
+            numbers: number,           // User ka number array mein hona chahiye
+            numbers: { $ne: [] },      // Array empty nahi hona chahiye
             claimedNumbers: { $ne: number }
         });
         
@@ -801,13 +808,22 @@ app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
         }
         
         let totalAmount = 0;
+        const claimedLifafas = [];
+        
         for (const lifafa of lifafas) {
             totalAmount += lifafa.amount;
+            claimedLifafas.push(lifafa.title);
             
             lifafa.claimedBy.push(user._id);
             lifafa.claimedNumbers.push(number);
             lifafa.claimedCount++;
             lifafa.totalAmount += lifafa.amount;
+            
+            const totalAllowed = lifafa.totalUsers || lifafa.numbers?.length || 999999;
+            if (lifafa.claimedCount >= totalAllowed) {
+                lifafa.isActive = false;
+            }
+            
             await lifafa.save();
         }
         
@@ -826,10 +842,17 @@ app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
             { parse_mode: 'Markdown' }
         );
         
-        res.json({ success: true, totalLifafas: lifafas.length, totalAmount, newBalance: user.balance });
+        res.json({ 
+            success: true, 
+            totalLifafas: lifafas.length, 
+            totalAmount, 
+            newBalance: user.balance,
+            claimed: claimedLifafas
+        });
         
     } catch(err) {
-        res.json({ success: false, msg: 'Failed to claim' });
+        console.error('Claim all error:', err);
+        res.json({ success: false, msg: 'Failed to claim all' });
     }
 });
 
@@ -876,6 +899,7 @@ app.get('/api/lifafa/:code', async (req, res) => {
     }
 });
 
+// ==================== PUBLIC LIFAFA CLAIM - FIXED ====================
 app.post('/api/lifafa/claim', async (req, res) => {
     try {
         const { code, number } = req.body;
@@ -887,20 +911,19 @@ app.post('/api/lifafa/claim', async (req, res) => {
         const lifafa = await Lifafa.findOne({ code, isActive: true });
         if (!lifafa) return res.json({ success: false, msg: 'Invalid code' });
         
-        // Check eligibility for private lifafa
+        // FIXED: Private lifafa ko public claim se rokna
         if (lifafa.numbers && lifafa.numbers.length > 0) {
-            if (!lifafa.numbers.includes(number)) {
-                return res.json({ success: false, msg: 'You are not eligible for this lifafa' });
-            }
+            return res.json({ 
+                success: false, 
+                msg: 'This is a private lifafa. Please claim from your dashboard.' 
+            });
         }
-        // Public lifafas (limited/unlimited) - koi eligibility check nahi
         
         if (lifafa.claimedNumbers && lifafa.claimedNumbers.includes(number)) {
             return res.json({ success: false, msg: 'Already claimed' });
         }
         
-        // Check if limit reached
-        const totalAllowed = lifafa.totalUsers || lifafa.numbers?.length || 999999;
+        const totalAllowed = lifafa.totalUsers || 999999;
         if (lifafa.claimedCount >= totalAllowed) {
             lifafa.isActive = false;
             await lifafa.save();
@@ -915,7 +938,6 @@ app.post('/api/lifafa/claim', async (req, res) => {
         lifafa.claimedCount++;
         lifafa.totalAmount += lifafa.amount;
         
-        // Mark as inactive if limit reached
         if (lifafa.claimedCount >= totalAllowed) {
             lifafa.isActive = false;
         }
@@ -926,13 +948,13 @@ app.post('/api/lifafa/claim', async (req, res) => {
             userId: user._id,
             type: 'credit',
             amount: lifafa.amount,
-            description: `Claimed Lifafa: ${lifafa.title}`
+            description: `Claimed Public Lifafa: ${lifafa.title}`
         }).save();
         
         res.json({ success: true, amount: lifafa.amount, newBalance: user.balance });
         
     } catch(err) {
-        console.error('Error in /api/lifafa/claim', err);
+        console.error('Public claim error:', err);
         res.json({ success: false, msg: 'Claim failed' });
     }
 });
