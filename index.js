@@ -395,8 +395,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
         otpStore.set(number, {
             otp,
             telegramUid,
-            expires: Date.now() + 5 * 60 * 1000,
-            attempts: 0
+            expires: Date.now() + 5 * 60 * 1000
         });
         
         const sent = await telegram.sendOTP(telegramUid, otp);
@@ -412,6 +411,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
     }
 });
 
+// ===== FIXED: REMOVED MANY ATTEMPTS =====
 app.post('/api/auth/verify-otp', async (req, res) => {
     try {
         const { username, number, password, telegramUid, otp } = req.body;
@@ -440,12 +440,6 @@ app.post('/api/auth/verify-otp', async (req, res) => {
         }
         
         if (stored.otp !== otp) {
-            stored.attempts = (stored.attempts || 0) + 1;
-            if (stored.attempts >= 3) {
-                otpStore.delete(number);
-                return res.json({ success: false, msg: 'Too many failed attempts. Request new OTP.' });
-            }
-            otpStore.set(number, stored);
             return res.json({ success: false, msg: 'Invalid OTP' });
         }
         
@@ -520,8 +514,7 @@ app.post('/api/auth/send-login-otp', async (req, res) => {
             otp,
             telegramUid: user.telegramUid,
             userId: user._id,
-            expires: Date.now() + 5 * 60 * 1000,
-            attempts: 0
+            expires: Date.now() + 5 * 60 * 1000
         });
         
         const sent = await telegram.sendOTP(user.telegramUid, otp);
@@ -537,6 +530,7 @@ app.post('/api/auth/send-login-otp', async (req, res) => {
     }
 });
 
+// ===== FIXED: REMOVED MANY ATTEMPTS =====
 app.post('/api/auth/verify-login-otp', async (req, res) => {
     try {
         const { number, otp, ip } = req.body;
@@ -551,12 +545,6 @@ app.post('/api/auth/verify-login-otp', async (req, res) => {
         }
         
         if (stored.otp !== otp) {
-            stored.attempts = (stored.attempts || 0) + 1;
-            if (stored.attempts >= 3) {
-                otpStore.delete(`login_${number}`);
-                return res.json({ success: false, msg: 'Too many failed attempts. Request new OTP.' });
-            }
-            otpStore.set(`login_${number}`, stored);
             return res.json({ success: false, msg: 'Invalid OTP' });
         }
         
@@ -598,6 +586,7 @@ app.post('/api/auth/verify-login-otp', async (req, res) => {
     }
 });
 
+// ===== FIXED: REMOVED MANY RESEND ATTEMPTS =====
 app.post('/api/auth/resend-otp', async (req, res) => {
     try {
         const { number, type } = req.body;
@@ -611,13 +600,6 @@ app.post('/api/auth/resend-otp', async (req, res) => {
         
         if (!stored) {
             return res.json({ success: false, msg: 'Request OTP first' });
-        }
-        
-        // Check if too many resend attempts
-        stored.resendAttempts = (stored.resendAttempts || 0) + 1;
-        if (stored.resendAttempts > 3) {
-            otpStore.delete(key);
-            return res.json({ success: false, msg: 'Too many resend attempts. Please try again later.' });
         }
         
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
