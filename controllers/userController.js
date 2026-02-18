@@ -296,4 +296,276 @@ exports.createLifafa = async (req, res) => {
         if (allowedNumbers.length > 0) {
             totalUsers = allowedNumbers.length;
             lifafaType = 'private';
+        } else if (userCount && parseInt(userCount) > 0) {
+            totalUsers = parseInt(userCount);
+            if (totalUsers > 1000) {
+                return res.json({ success: false, msg: 'Maximum 1000 users allowed' });
+            }
+            lifafaType = 'public_limited';
+        } else if (numbers && numbers.trim()) {
+            const manualNumbers = numbers.split('\n').filter(n => n.trim());
+            allowedNumbers = manualNumbers;
+            totalUsers = manualNumbers.length;
+            if (totalUsers > 100) {
+                return res.json({ success: false, msg: 'Maximum 100 numbers allowed' });
+            }
+            lifafaType = 'private';
         }
+        
+        const totalCost = amount * totalUsers;
+        
+        if (user.balance < totalCost) {
+            return res.json({ success: false, msg: `Insufficient balance. Required: ₹${totalCost}` });
+        }
+        
+        const lifafaCode = 'LIF' + Math.random().toString(36).substring(2, 10).toUpperCase();
+        
+        const lifafa = new Lifafa({
+            title,
+            code: lifafaCode,
+            amount,
+            numbers: allowedNumbers,
+            totalUsers: totalUsers,
+            createdBy: user._id,
+            createdByNumber: user.number,
+            isUserCreated: true,
+            isActive: true,
+            claimedCount: 0,
+            claimedNumbers: []
+        });
+        
+        await lifafa.save();
+        
+        user.balance -= totalCost;
+        await user.save();
+        
+        await new Transaction({
+            userId: user._id,
+            type: 'debit',
+            amount: totalCost,
+            description: `Created ${lifafaType} Lifafa: ${title} (${totalUsers} users)`
+        }).save();
+        
+        const baseUrl = process.env.FRONTEND_URL || 'https://muskilxlifafa.vercel.app';
+        const shareableLink = `${baseUrl}/claimlifafa.html?code=${lifafaCode}`;
+        
+        let message = `🎁 *Lifafa Created!*\n\n*Title:* ${title}\n*Amount:* ₹${amount}`;
+        if (lifafaType === 'private') {
+            message += `\n*Type:* Private (${totalUsers} specific users)`;
+        } else if (lifafaType === 'public_limited') {
+            message += `\n*Type:* Public Limited (${totalUsers} spots)`;
+        } else {
+            message += `\n*Type:* Public Unlimited`;
+        }
+        message += `\n*Total Cost:* ₹${totalCost}\n*Code:* \`${lifafaCode}\`\n*Link:* ${shareableLink}`;
+        
+        await telegram.sendMessage(user.telegramUid, message, { parse_mode: 'Markdown' });
+        
+        res.json({ 
+            success: true, 
+            msg: 'Lifafa created successfully',
+            code: lifafaCode,
+            link: shareableLink,
+            totalUsers,
+            totalCost,
+            newBalance: user.balance,
+            type: lifafaType
+        });
+        
+    } catch(err) {
+        console.error('Create lifafa error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to create lifafa' });
+    }
+};
+
+// Get my lifafas
+exports.getMyLifafas = async (req, res) => {
+    try {
+        const lifafas = await Lifafa.find({ createdBy: req.userId })
+            .sort('-createdAt')
+            .limit(50);
+        
+        res.json({ success: true, lifafas });
+    } catch(err) {
+        console.error('My lifafas error:', err);
+        res.status(500).json({ success: false, msg: 'Error loading lifafas' });
+    }
+};
+
+// Get unclaimed lifafas
+exports.getUnclaimedLifafas = async (req, res) => {
+    try {
+        const { number } = req.body;
+        const user = req.user;
+        
+        if (!number || number !== user.number) {
+            return res.json({ success: false, msg: 'Invalid number' });
+        }
+        
+        const lifafas = await Lifafa.find({
+            isActive: true,
+            $and: [
+                { numbers: number },
+                { numbers: { $ne: [] } },
+                { numbers: { $exists: true } }
+            ],
+            claimedNumbers: { $ne: number }
+        }).sort('-createdAt');
+        
+        res.json({ 
+            success: true,
+            lifafas: lifafas.map(l => ({
+                _id: l._id,
+                title: l.title,
+                amount: l.amount,
+                code: l.code,
+                channel: l.channel,
+                isPublic: false,
+                totalUsers: l.totalUsers || 1,
+                claimedCount: l.claimedCount || 0
+            }))
+        });
+        
+    } catch(err) {
+        console.error('Unclaimed lifafas error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to fetch lifafas' });
+    }
+};
+
+// Claim lifafa
+exports.claimLifafa = async (req, res) => {
+    try {
+        const { code } = req.body;
+        const user = req.user;
+        
+        if (!code || !/^LIF[A-Z0-9]+$/.test(code)) {
+            return res.json({ success: false, msg: 'Invalid code format' });
+        }
+        
+        const lifafa = await Lifafa.findOne({ code, isActive: true });
+        if (!lifafa) {
+            return res.json({ success: false, msg: 'Invalid or expired code' });
+        }
+        
+        if (lifafa.numbers && lifafa.numbers.length > 0) {
+            if (!lifafa.numbers.includes(user.number)) {
+                return res.json({ 
+                    success: false, 
+                    msg: 'This is a private lifafa and you are not eligible to claim it' 
+                });
+            }
+        }
+        
+        if (lifafa.claimedNumbers && lifafa.claimedNumbers.includes(user.number)) {
+            return res.json({ success: false, msg: 'Already claimed' });
+        }
+        
+        const totalAllowed = lifafa.totalUsers || lifafa.numbers?.length || 999999;
+        if (lifafa.claimedCount >= totalAllowed) {
+            return res.json({ success: false, msg: 'This lifafa is fully claimed' });
+        }
+        
+        user.balance += lifafa.amount;
+        await user.save();
+        
+        lifafa.claimedBy.push(user._id);
+        lifafa.claimedNumbers.push(user.number);
+        lifafa.claimedCount++;
+        lifafa.totalAmount += lifafa.amount;
+        
+        if (lifafa.claimedCount >= totalAllowed) {
+            lifafa.isActive = false;
+        }
+        
+        await lifafa.save();
+        
+        await new Transaction({
+            userId: user._id,
+            type: 'credit',
+            amount: lifafa.amount,
+            description: `Claimed Lifafa: ${lifafa.title}`
+        }).save();
+        
+        await telegram.sendLifafaClaimAlert(user.telegramUid, lifafa, user.balance);
+        
+        res.json({ success: true, amount: lifafa.amount, newBalance: user.balance });
+        
+    } catch(err) {
+        console.error('Claim lifafa error:', err);
+        res.status(500).json({ success: false, msg: 'Claim failed' });
+    }
+};
+
+// Claim all lifafas
+exports.claimAllLifafas = async (req, res) => {
+    try {
+        const { number } = req.body;
+        const user = req.user;
+        
+        if (!number || number !== user.number) {
+            return res.json({ success: false, msg: 'Invalid number' });
+        }
+        
+        const lifafas = await Lifafa.find({
+            isActive: true,
+            $and: [
+                { numbers: number },
+                { numbers: { $ne: [] } },
+                { numbers: { $exists: true } }
+            ],
+            claimedNumbers: { $ne: number }
+        });
+        
+        if (lifafas.length === 0) {
+            return res.json({ success: false, msg: 'No unclaimed private lifafas' });
+        }
+        
+        if (lifafas.length > 10) {
+            return res.json({ success: false, msg: 'Cannot claim more than 10 lifafas at once' });
+        }
+        
+        let totalAmount = 0;
+        
+        for (const lifafa of lifafas) {
+            totalAmount += lifafa.amount;
+            
+            lifafa.claimedBy.push(user._id);
+            lifafa.claimedNumbers.push(number);
+            lifafa.claimedCount++;
+            lifafa.totalAmount += lifafa.amount;
+            
+            const totalAllowed = lifafa.totalUsers || lifafa.numbers?.length || 999999;
+            if (lifafa.claimedCount >= totalAllowed) {
+                lifafa.isActive = false;
+            }
+            
+            await lifafa.save();
+        }
+        
+        user.balance += totalAmount;
+        await user.save();
+        
+        await new Transaction({
+            userId: user._id,
+            type: 'credit',
+            amount: totalAmount,
+            description: `Bulk claimed ${lifafas.length} private lifafas`
+        }).save();
+        
+        await telegram.sendMessage(user.telegramUid,
+            `🎊 *Bulk Claim Successful!*\n\n*Total Private Lifafas:* ${lifafas.length}\n*Total Amount:* +₹${totalAmount}\n*New Balance:* ₹${user.balance}`,
+            { parse_mode: 'Markdown' }
+        );
+        
+        res.json({ 
+            success: true, 
+            totalLifafas: lifafas.length, 
+            totalAmount, 
+            newBalance: user.balance
+        });
+        
+    } catch(err) {
+        console.error('Claim all error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to claim all' });
+    }
+};
