@@ -864,6 +864,58 @@ app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
     }
 });
 
+// ==================== PUBLIC/PRIVATE LIFAFA DETAILS - FIXED ====================
+app.get('/api/lifafa/:code', async (req, res) => {
+    try {
+        const { code } = req.params;
+        // Find the lifafa. It doesn't need to be active to show its details,
+        // but the frontend claim button will be disabled if it's not.
+        const lifafa = await Lifafa.findOne({ code }).populate('createdBy', 'username number');
+
+        if (!lifafa) {
+            return res.json({ success: false, msg: 'Lifafa not found' });
+        }
+
+        // Determine lifafa type and calculate remaining spots safely
+        let type = 'public_unlimited';
+        let totalAllowed = 1;
+        if (lifafa.numbers && lifafa.numbers.length > 0) {
+            type = 'private';
+            totalAllowed = lifafa.numbers.length;
+        } else if (lifafa.totalUsers > 1) {
+            type = 'public_limited';
+            totalAllowed = lifafa.totalUsers;
+        }
+
+        const claimedCount = lifafa.claimedCount || 0;
+        const remaining = Math.max(0, totalAllowed - claimedCount);
+
+        res.json({
+            success: true,
+            lifafa: {
+                title: lifafa.title,
+                amount: lifafa.amount,
+                code: lifafa.code,
+                channel: lifafa.channel,
+                numbers: lifafa.numbers,
+                totalUsers: lifafa.totalUsers || 1,
+                type: type,
+                createdBy: lifafa.createdBy ? {
+                    username: lifafa.createdBy.username,
+                    number: lifafa.createdBy.number
+                } : null,
+                claimedCount: claimedCount,
+                remainingSpots: remaining,
+                isActive: lifafa.isActive,
+                createdAt: lifafa.createdAt
+            }
+        });
+    } catch(err) {
+        console.error('❌ Error in /api/lifafa/:code', err);
+        res.status(500).json({ success: false, msg: 'Server error loading lifafa' });
+    }
+});
+
 // ==================== PUBLIC/PRIVATE LIFAFA CLAIM - FIXED ====================
 app.post('/api/lifafa/claim', async (req, res) => {
     try {
@@ -885,10 +937,9 @@ app.post('/api/lifafa/claim', async (req, res) => {
                     msg: '❌ This private lifafa is not for you' 
                 });
             }
-            // ✅ Agar number list mein hai to proceed - yahi fix hai
+            // ✅ Agar number list mein hai to proceed
             console.log(`✅ Private lifafa claim allowed for ${number}`);
         }
-        // Public lifafas ke liye koi check nahi
         
         if (lifafa.claimedNumbers && lifafa.claimedNumbers.includes(number)) {
             return res.json({ success: false, msg: '❌ Already claimed' });
