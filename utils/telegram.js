@@ -49,21 +49,41 @@ async function sendSafeMessage(chatId, text, options = {}) {
     }
 }
 
-// Check if user is member of a channel
+// ✅ FIXED: Check if user is member of a channel using actual Telegram API
 async function checkChannelMembership(chatId, channel) {
-    if (!bot) return false;
+    if (!bot) {
+        console.log('⚠️ Bot not initialized, cannot check membership');
+        return false;
+    }
+    
     try {
         // Remove @ from channel name if present
         const channelName = channel.replace('@', '');
         
-        // Get chat member information
+        console.log(`🔍 Checking membership for user ${chatId} in channel @${channelName}`);
+        
+        // Get chat member information from Telegram
         const chatMember = await bot.getChatMember(`@${channelName}`, chatId);
+        
+        console.log(`📊 Member status: ${chatMember.status}`);
         
         // Check if user is member (status: 'member', 'administrator', or 'creator')
         const validStatuses = ['member', 'administrator', 'creator'];
-        return validStatuses.includes(chatMember.status);
+        const isMember = validStatuses.includes(chatMember.status);
+        
+        console.log(`✅ Is member: ${isMember}`);
+        
+        return isMember;
     } catch (err) {
-        console.error(`Error checking channel membership for ${channel}:`, err.message);
+        console.error(`❌ Error checking channel membership for ${channel}:`, err.message);
+        
+        // Specific error handling
+        if (err.message.includes('chat not found')) {
+            console.log(`⚠️ Channel @${channel} not found or bot is not admin`);
+        } else if (err.message.includes('user not found')) {
+            console.log(`⚠️ User ${chatId} not found in channel`);
+        }
+        
         return false;
     }
 }
@@ -75,13 +95,11 @@ const initBot = (token) => {
     }
     
     try {
-        // ✅ FIX: Always use polling mode for Render
-        // Webhook mode causes issues on free hosting
+        // Use polling mode
         bot = new TelegramBot(token, { 
             polling: true,
-            // Optional: Add polling options
             polling: {
-                interval: 300, // Optional: polling interval in ms
+                interval: 300,
                 autoStart: true,
                 params: {
                     timeout: 10
@@ -124,17 +142,18 @@ function setupBotHandlers() {
         sendHelpMessage(chatId);
     });
     
-    // Handle /verify command (for manual verification)
-    bot.onText(/\/verify/, (msg) => {
+    // Handle /check command - for testing
+    bot.onText(/\/check (.+)/, async (msg, match) => {
         const chatId = msg.chat.id;
-        sendSafeMessage(chatId, 
-            `🔐 *Verification*\n\n` +
-            `To verify channels, please use the website.\n` +
-            `1. Go to the claim page\n` +
-            `2. Enter your number\n` +
-            `3. Follow the channel join instructions`,
-            { parse_mode: 'Markdown' }
-        );
+        const channel = match[1];
+        
+        const isMember = await checkChannelMembership(chatId, channel);
+        
+        if (isMember) {
+            sendSafeMessage(chatId, `✅ You are a member of ${channel}`);
+        } else {
+            sendSafeMessage(chatId, `❌ You are NOT a member of ${channel}`);
+        }
     });
     
     // Error handler
@@ -151,13 +170,14 @@ async function sendWelcomeMessage(chatId) {
         `This bot helps verify your channel membership for Lifafa claims.\n\n` +
         `🔹 Commands\n` +
         `/id - Get your Telegram ID\n` +
+        `/check <channel> - Check if you're in a channel\n` +
         `/help - Show help\n\n` +
         `🔹 How it Works\n` +
         `1. Register on the website with your Telegram ID\n` +
         `2. When claiming a lifafa with channels, you'll see join buttons\n` +
         `3. Join the required channels\n` +
-        `4. Click Verify & Claim - we'll automatically check if you've joined\n\n` +
-        `✅ That's it! No separate verification needed.`;
+        `4. Click Verify - we'll automatically check if you've joined\n\n` +
+        `✅ That's it!`;
     
     await sendSafeMessage(chatId, welcomeMsg);
 }
@@ -167,6 +187,7 @@ async function sendHelpMessage(chatId) {
     const helpMsg = `📖 Bot Commands Help\n\n` +
         `/start - Start the bot\n` +
         `/id - Get your Telegram ID\n` +
+        `/check <channel> - Check channel membership\n` +
         `/help - Show this help\n\n` +
         `🔹 Need Support?\n` +
         `Contact @LifafaSupport for any issues.`;
