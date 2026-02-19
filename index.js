@@ -44,9 +44,7 @@ const allowedOrigins = [
 
 app.use(cors({
     origin: function(origin, callback) {
-        // Allow requests with no origin (mobile apps, Postman, curl)
         if (!origin) return callback(null, true);
-        
         if (allowedOrigins.indexOf(origin) === -1) {
             const msg = '❌ CORS policy violation: This origin is not allowed to access this API.';
             console.log(`Blocked origin: ${origin}`);
@@ -58,48 +56,40 @@ app.use(cors({
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
     exposedHeaders: ['Content-Range', 'X-Content-Range'],
-    maxAge: 600 // 10 minutes - cache preflight requests
+    maxAge: 600
 }));
 
-// Handle preflight requests
 app.options('*', cors());
 
-// 3. Rate Limiting - Only for general API, NOT for auth routes
+// 3. Rate Limiting
 const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // limit each IP to 100 requests per windowMs
+    windowMs: 15 * 60 * 1000,
+    max: 100,
     message: { success: false, msg: 'Too many requests from this IP, please try again later.' },
     standardHeaders: true,
     legacyHeaders: false,
 });
 
-// Apply rate limiting to all routes EXCEPT auth
 app.use('/api', (req, res, next) => {
     if (req.path.startsWith('/auth')) {
-        return next(); // Skip rate limiting for auth routes
+        return next();
     }
     limiter(req, res, next);
 });
 
-// 4. Body parsing with size limits
-app.use(express.json({ limit: '10kb' })); // Limit body size to 10kb
+// 4. Body parsing
+app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
 
-// 5. Data sanitization against NoSQL injection
+// 5. Data sanitization
 app.use(mongoSanitize());
-
-// 6. Data sanitization against XSS
 app.use(xss());
-
-// 7. Prevent parameter pollution
 app.use(hpp({
-    whitelist: ['page', 'limit', 'sort'] // Allow these parameters to be duplicated
+    whitelist: ['page', 'limit', 'sort']
 }));
-
-// 8. Compression
 app.use(compression());
 
-// 9. Logging middleware
+// 6. Logging
 app.use((req, res, next) => {
     console.log(`${new Date().toISOString()} - ${req.method} ${req.originalUrl} - IP: ${req.ip}`);
     next();
@@ -107,7 +97,6 @@ app.use((req, res, next) => {
 
 // ==================== ENVIRONMENT CHECKS ====================
 
-// Check required environment variables
 const requiredEnvVars = [
     'MONGODB_URI',
     'JWT_SECRET',
@@ -129,14 +118,14 @@ console.log('✅ Environment variables verified');
 // Initialize Telegram Bot
 const bot = telegram.initBot(process.env.TELEGRAM_BOT_TOKEN);
 
-// MongoDB Connection with secure options
+// MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI, {
     useNewUrlParser: true,
     useUnifiedTopology: true,
-    maxPoolSize: 10, // Maximum number of connections
-    minPoolSize: 2,  // Minimum number of connections
-    serverSelectionTimeoutMS: 5000, // Timeout after 5 seconds
-    socketTimeoutMS: 45000, // Close sockets after 45 seconds
+    maxPoolSize: 10,
+    minPoolSize: 2,
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
 })
 .then(() => console.log('✅ MongoDB Connected Successfully'))
 .catch(err => {
@@ -144,7 +133,6 @@ mongoose.connect(process.env.MONGODB_URI, {
     process.exit(1);
 });
 
-// Handle MongoDB connection errors after initial connection
 mongoose.connection.on('error', err => {
     console.error('❌ MongoDB connection error:', err);
 });
@@ -153,7 +141,6 @@ mongoose.connection.on('disconnected', () => {
     console.log('⚠️ MongoDB disconnected');
 });
 
-// Graceful shutdown
 process.on('SIGINT', async () => {
     await mongoose.connection.close();
     console.log('MongoDB connection closed through app termination');
@@ -171,6 +158,7 @@ const UserSchema = new mongoose.Schema({
     isBlocked: { type: Boolean, default: false },
     lastLogin: Date,
     lastLoginIp: String,
+    channels: [{ type: String }], // User's joined channels
     createdAt: { type: Date, default: Date.now, index: true }
 });
 
@@ -196,6 +184,11 @@ const LifafaSchema = new mongoose.Schema({
     claimedCount: { type: Number, default: 0, min: 0 },
     totalAmount: { type: Number, default: 0, min: 0 },
     isActive: { type: Boolean, default: true, index: true },
+    
+    // Channel Verification Fields
+    channelRequired: { type: Boolean, default: false },
+    channel: { type: String, default: null }, // Channel name (e.g., @channelname)
+    
     createdAt: { type: Date, default: Date.now, index: true }
 });
 
@@ -214,7 +207,7 @@ const CodeSchema = new mongoose.Schema({
     code: { type: String, required: true, unique: true, index: true },
     numbers: [{ type: String }],
     createdBy: String,
-    createdAt: { type: Date, default: Date.now, expires: 86400 } // Auto delete after 24 hours
+    createdAt: { type: Date, default: Date.now, expires: 86400 }
 });
 
 const AdminSchema = new mongoose.Schema({
@@ -230,7 +223,7 @@ const Withdrawal = mongoose.model('Withdrawal', WithdrawalSchema);
 const Code = mongoose.model('Code', CodeSchema);
 const Admin = mongoose.model('Admin', AdminSchema);
 
-// Create indexes for better performance
+// Create indexes
 UserSchema.index({ number: 1 });
 UserSchema.index({ telegramUid: 1 });
 LifafaSchema.index({ code: 1 });
@@ -294,7 +287,7 @@ const adminMiddleware = async (req, res, next) => {
     }
 };
 
-// Store OTPs with cleanup
+// Store OTPs
 const otpStore = new Map();
 setInterval(() => {
     const now = Date.now();
@@ -304,11 +297,11 @@ setInterval(() => {
             console.log(`🧹 Cleaned up expired OTP for ${key}`);
         }
     }
-}, 5 * 60 * 1000); // Clean up every 5 minutes
+}, 5 * 60 * 1000);
 
 // ==================== API ROUTES ====================
 
-// Health check endpoint
+// Health check
 app.get('/api/health', (req, res) => {
     res.json({
         success: true,
@@ -330,16 +323,14 @@ app.get('/api/test', (req, res) => {
     });
 });
 
-// ==================== AUTH ROUTES - NO LIMITS ====================
+// ==================== AUTH ROUTES ====================
 
 app.post('/api/auth/check-number', async (req, res) => {
     try {
         const { number } = req.body;
-        
         if (!number || !/^\d{10}$/.test(number)) {
             return res.json({ success: false, msg: 'Invalid number format' });
         }
-        
         const user = await User.findOne({ number });
         res.json({ exists: !!user });
     } catch(err) {
@@ -351,11 +342,9 @@ app.post('/api/auth/check-number', async (req, res) => {
 app.post('/api/auth/check-telegram', async (req, res) => {
     try {
         const { telegramUid } = req.body;
-        
         if (!telegramUid || typeof telegramUid !== 'string') {
             return res.json({ success: false, msg: 'Invalid Telegram UID' });
         }
-        
         const existing = await User.findOne({ telegramUid });
         res.json({ available: !existing });
     } catch(err) {
@@ -407,12 +396,10 @@ app.post('/api/auth/send-otp', async (req, res) => {
     }
 });
 
-// ===== NO ATTEMPT LIMIT =====
 app.post('/api/auth/verify-otp', async (req, res) => {
     try {
         const { username, number, password, telegramUid, otp } = req.body;
         
-        // Validation
         if (!username || !number || !password || !telegramUid || !otp) {
             return res.json({ success: false, msg: 'All fields required' });
         }
@@ -429,7 +416,6 @@ app.post('/api/auth/verify-otp', async (req, res) => {
             return res.json({ success: false, msg: 'Password must be at least 6 characters' });
         }
         
-        // Check OTP
         const stored = otpStore.get(number);
         if (!stored) {
             return res.json({ success: false, msg: 'OTP expired or not requested' });
@@ -448,19 +434,16 @@ app.post('/api/auth/verify-otp', async (req, res) => {
             return res.json({ success: false, msg: 'OTP expired' });
         }
         
-        // Double check if Telegram UID already used
         const existingTelegram = await User.findOne({ telegramUid });
         if (existingTelegram) {
             return res.json({ success: false, msg: 'Telegram ID already used' });
         }
         
-        // Check if number exists
         const existingUser = await User.findOne({ number });
         if (existingUser) {
             return res.json({ success: false, msg: 'Number already registered' });
         }
         
-        // Create user
         const hashedPassword = bcrypt.hashSync(password, 10);
         
         const user = new User({
@@ -468,7 +451,8 @@ app.post('/api/auth/verify-otp', async (req, res) => {
             number,
             password: hashedPassword,
             telegramUid,
-            balance: 0
+            balance: 0,
+            channels: [] // Initialize empty channels array
         });
         
         await user.save();
@@ -526,7 +510,6 @@ app.post('/api/auth/send-login-otp', async (req, res) => {
     }
 });
 
-// ===== NO ATTEMPT LIMIT =====
 app.post('/api/auth/verify-login-otp', async (req, res) => {
     try {
         const { number, otp, ip } = req.body;
@@ -554,12 +537,10 @@ app.post('/api/auth/verify-login-otp', async (req, res) => {
             return res.json({ success: false, msg: 'User not found' });
         }
         
-        // Update last login
         user.lastLogin = new Date();
         user.lastLoginIp = ip;
         await user.save();
         
-        // Send login alert
         await telegram.sendLoginAlert(user.telegramUid, user, ip);
         
         const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
@@ -572,7 +553,8 @@ app.post('/api/auth/verify-login-otp', async (req, res) => {
             user: { 
                 number: user.number, 
                 balance: user.balance, 
-                username: user.username 
+                username: user.username,
+                channels: user.channels || []
             }
         });
         
@@ -612,6 +594,135 @@ app.post('/api/auth/resend-otp', async (req, res) => {
     } catch(err) {
         console.error('Resend OTP error:', err);
         res.status(500).json({ success: false, msg: 'Failed to resend' });
+    }
+});
+
+// ==================== CHANNEL ROUTES ====================
+
+// Save user channels
+app.post('/api/user/save-channels', authMiddleware, async (req, res) => {
+    try {
+        const { channels } = req.body;
+        const user = req.user;
+        
+        if (!Array.isArray(channels)) {
+            return res.json({ success: false, msg: 'Channels must be an array' });
+        }
+        
+        // Validate channel format
+        const validChannels = channels.filter(c => 
+            typeof c === 'string' && c.startsWith('@') && c.length > 1
+        );
+        
+        user.channels = validChannels;
+        await user.save();
+        
+        res.json({ 
+            success: true, 
+            msg: 'Channels saved successfully',
+            channels: user.channels
+        });
+        
+    } catch(err) {
+        console.error('Save channels error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to save channels' });
+    }
+});
+
+// Get user channels
+app.get('/api/user/channels', authMiddleware, async (req, res) => {
+    try {
+        const user = req.user;
+        res.json({ 
+            success: true, 
+            channels: user.channels || [] 
+        });
+    } catch(err) {
+        console.error('Get channels error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to get channels' });
+    }
+});
+
+// Add single channel
+app.post('/api/user/add-channel', authMiddleware, async (req, res) => {
+    try {
+        const { channel } = req.body;
+        const user = req.user;
+        
+        if (!channel || typeof channel !== 'string' || !channel.startsWith('@')) {
+            return res.json({ success: false, msg: 'Invalid channel format' });
+        }
+        
+        if (!user.channels) {
+            user.channels = [];
+        }
+        
+        if (user.channels.includes(channel)) {
+            return res.json({ success: false, msg: 'Channel already exists' });
+        }
+        
+        user.channels.push(channel);
+        await user.save();
+        
+        res.json({ 
+            success: true, 
+            msg: 'Channel added',
+            channels: user.channels
+        });
+        
+    } catch(err) {
+        console.error('Add channel error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to add channel' });
+    }
+});
+
+// Remove channel
+app.post('/api/user/remove-channel', authMiddleware, async (req, res) => {
+    try {
+        const { channel } = req.body;
+        const user = req.user;
+        
+        if (!channel) {
+            return res.json({ success: false, msg: 'Channel required' });
+        }
+        
+        user.channels = (user.channels || []).filter(c => c !== channel);
+        await user.save();
+        
+        res.json({ 
+            success: true, 
+            msg: 'Channel removed',
+            channels: user.channels
+        });
+        
+    } catch(err) {
+        console.error('Remove channel error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to remove channel' });
+    }
+});
+
+// Verify channel membership
+app.post('/api/user/verify-channel', authMiddleware, async (req, res) => {
+    try {
+        const { channel } = req.body;
+        const user = req.user;
+        
+        if (!channel) {
+            return res.json({ success: false, msg: 'Channel required' });
+        }
+        
+        // Check if user has channel in their list
+        const hasChannel = (user.channels || []).includes(channel);
+        
+        res.json({ 
+            success: true, 
+            verified: hasChannel,
+            channel
+        });
+        
+    } catch(err) {
+        console.error('Verify channel error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to verify channel' });
     }
 });
 
@@ -708,6 +819,7 @@ app.get('/api/user/dashboard', authMiddleware, async (req, res) => {
             username: user.username,
             number: user.number,
             telegramUid: user.telegramUid,
+            channels: user.channels || [],
             unclaimedLifafas: unclaimedCount,
             recentTransactions,
             createdLifafas
@@ -740,6 +852,7 @@ app.get('/api/user/profile', authMiddleware, async (req, res) => {
                 joinedAt: user.createdAt,
                 lastLogin: user.lastLogin,
                 isBlocked: user.isBlocked,
+                channels: user.channels || [],
                 stats: {
                     lifafasCreated: totalLifafasCreated,
                     lifafasClaimed: totalLifafasClaimed,
@@ -874,7 +987,6 @@ app.post('/api/user/withdraw', authMiddleware, async (req, res) => {
             return res.json({ success: false, msg: 'Insufficient balance' });
         }
         
-        // Check if user has pending withdrawals
         const pendingWithdrawals = await Withdrawal.countDocuments({
             userId: user._id,
             status: 'pending'
@@ -927,7 +1039,7 @@ app.get('/api/user/withdrawals', authMiddleware, async (req, res) => {
 
 app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
     try {
-        const { title, amount, code, numbers, userCount, channel } = req.body;
+        const { title, amount, code, numbers, userCount, channel, channelRequired } = req.body;
         const user = req.user;
         
         if (!title || !amount || amount <= 0) {
@@ -960,7 +1072,7 @@ app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
             }
         }
         
-        // Calculate total users correctly
+        // Calculate total users
         let totalUsers = 1;
         let lifafaType = 'public_unlimited';
         
@@ -1002,7 +1114,9 @@ app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
             isUserCreated: true,
             isActive: true,
             claimedCount: 0,
-            claimedNumbers: []
+            claimedNumbers: [],
+            channelRequired: channelRequired || false,
+            channel: channel || null
         });
         
         await lifafa.save();
@@ -1014,7 +1128,7 @@ app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
             userId: user._id,
             type: 'debit',
             amount: totalCost,
-            description: `Created ${lifafaType} Lifafa: ${title} (${totalUsers} users)`
+            description: `Created ${lifafaType} Lifafa: ${title} (${totalUsers} users)${channelRequired ? ' with channel verification' : ''}`
         }).save();
         
         const baseUrl = process.env.FRONTEND_URL || 'https://muskilxlifafa.vercel.app';
@@ -1028,6 +1142,9 @@ app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
         } else {
             message += `\n*Type:* Public Unlimited`;
         }
+        if (channelRequired && channel) {
+            message += `\n*Channel:* ${channel}`;
+        }
         message += `\n*Total Cost:* ₹${totalCost}\n*Code:* \`${lifafaCode}\`\n*Link:* ${shareableLink}`;
         
         await telegram.sendMessage(user.telegramUid, message, { parse_mode: 'Markdown' });
@@ -1040,7 +1157,9 @@ app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
             totalUsers,
             totalCost,
             newBalance: user.balance,
-            type: lifafaType
+            type: lifafaType,
+            channelRequired,
+            channel
         });
         
     } catch(err) {
@@ -1089,6 +1208,7 @@ app.post('/api/user/unclaimed-lifafas', authMiddleware, async (req, res) => {
                 amount: l.amount,
                 code: l.code,
                 channel: l.channel,
+                channelRequired: l.channelRequired,
                 isPublic: false,
                 totalUsers: l.totalUsers || 1,
                 claimedCount: l.claimedCount || 0
@@ -1115,6 +1235,7 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
             return res.json({ success: false, msg: 'Invalid or expired code' });
         }
         
+        // Check eligibility
         if (lifafa.numbers && lifafa.numbers.length > 0) {
             if (!lifafa.numbers.includes(user.number)) {
                 return res.json({ 
@@ -1126,6 +1247,17 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
         
         if (lifafa.claimedNumbers && lifafa.claimedNumbers.includes(user.number)) {
             return res.json({ success: false, msg: 'Already claimed' });
+        }
+        
+        // Check channel verification if required
+        if (lifafa.channelRequired && lifafa.channel) {
+            const userChannels = user.channels || [];
+            if (!userChannels.includes(lifafa.channel)) {
+                return res.json({ 
+                    success: false, 
+                    msg: `You must join ${lifafa.channel} first` 
+                });
+            }
         }
         
         const totalAllowed = lifafa.totalUsers || lifafa.numbers?.length || 999999;
@@ -1195,6 +1327,17 @@ app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
         const claimedLifafas = [];
         
         for (const lifafa of lifafas) {
+            // Check channel verification for each lifafa
+            if (lifafa.channelRequired && lifafa.channel) {
+                const userChannels = user.channels || [];
+                if (!userChannels.includes(lifafa.channel)) {
+                    return res.json({ 
+                        success: false, 
+                        msg: `You must join ${lifafa.channel} first` 
+                    });
+                }
+            }
+            
             totalAmount += lifafa.amount;
             claimedLifafas.push(lifafa.title);
             
@@ -1276,6 +1419,7 @@ app.get('/api/lifafa/:code', async (req, res) => {
                 amount: lifafa.amount,
                 code: lifafa.code,
                 channel: lifafa.channel,
+                channelRequired: lifafa.channelRequired || false,
                 numbers: lifafa.numbers,
                 totalUsers: lifafa.totalUsers || 1,
                 type: type,
@@ -1336,6 +1480,17 @@ app.post('/api/lifafa/claim', async (req, res) => {
         
         if (lifafa.claimedNumbers && lifafa.claimedNumbers.includes(number)) {
             return res.json({ success: false, msg: 'Already claimed' });
+        }
+        
+        // Check channel verification if required
+        if (lifafa.channelRequired && lifafa.channel) {
+            const userChannels = user.channels || [];
+            if (!userChannels.includes(lifafa.channel)) {
+                return res.json({ 
+                    success: false, 
+                    msg: `You must join ${lifafa.channel} first` 
+                });
+            }
         }
         
         const totalAllowed = lifafa.totalUsers || lifafa.numbers?.length || 999999;
@@ -1605,7 +1760,7 @@ app.post('/api/admin/block-user', adminMiddleware, async (req, res) => {
 
 app.post('/api/admin/create-lifafa', adminMiddleware, async (req, res) => {
     try {
-        const { title, amount, numbers } = req.body;
+        const { title, amount, numbers, channelRequired, channel } = req.body;
         
         if (!title || !amount) {
             return res.json({ success: false, msg: 'Title and amount required' });
@@ -1633,12 +1788,20 @@ app.post('/api/admin/create-lifafa', adminMiddleware, async (req, res) => {
             code,
             numbers: allowedNumbers,
             createdBy: req.adminId,
-            isUserCreated: false
+            isUserCreated: false,
+            channelRequired: channelRequired || false,
+            channel: channel || null
         });
         
         await lifafa.save();
         
-        res.json({ success: true, msg: 'Lifafa created', code });
+        res.json({ 
+            success: true, 
+            msg: 'Lifafa created', 
+            code,
+            channelRequired,
+            channel
+        });
         
     } catch(err) {
         console.error('Create lifafa error:', err);
@@ -1865,7 +2028,6 @@ app.post('/api/admin/delete-user', adminMiddleware, async (req, res) => {
             return res.json({ success: false, msg: 'Cannot delete user with balance > 0. Refund first.' });
         }
         
-        // Start a session for transaction
         const session = await mongoose.startSession();
         session.startTransaction();
         
@@ -1954,7 +2116,6 @@ app.use('*', (req, res) => {
 app.use((err, req, res, next) => {
     console.error('❌ Unhandled error:', err);
     
-    // Check if error is a known type
     if (err.name === 'ValidationError') {
         return res.status(400).json({ 
             success: false, 
@@ -1977,7 +2138,6 @@ app.use((err, req, res, next) => {
         });
     }
     
-    // Default error
     res.status(500).json({ 
         success: false, 
         msg: 'Internal server error',
@@ -1992,9 +2152,8 @@ const server = app.listen(PORT, () => {
     console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`🔗 Test endpoint: http://localhost:${PORT}/api/test`);
     console.log(`🛡️ Security middleware enabled`);
-    console.log(`✅ OTP rate limiting completely removed - no limits on auth routes`);
+    console.log(`✅ Channel verification system ready`);
     
-    // Create default admin if not exists
     setTimeout(async () => {
         try {
             const adminExists = await Admin.findOne({ username: process.env.ADMIN_USERNAME });
@@ -2012,17 +2171,13 @@ const server = app.listen(PORT, () => {
     }, 2000);
 });
 
-// Handle unhandled promise rejections
 process.on('unhandledRejection', (err) => {
     console.error('❌ UNHANDLED REJECTION:', err);
-    // Close server & exit process
     server.close(() => process.exit(1));
 });
 
-// Handle uncaught exceptions
 process.on('uncaughtException', (err) => {
     console.error('❌ UNCAUGHT EXCEPTION:', err);
-    // Close server & exit process
     server.close(() => process.exit(1));
 });
 
