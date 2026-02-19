@@ -18,22 +18,10 @@ const app = express();
 
 // ==================== SECURITY MIDDLEWARE ====================
 
-// 1. Helmet - Secure headers
 app.use(helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
-    contentSecurityPolicy: {
-        directives: {
-            defaultSrc: ["'self'"],
-            styleSrc: ["'self'", "'unsafe-inline'", "https://cdn.tailwindcss.com", "https://fonts.googleapis.com"],
-            scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://cdn.tailwindcss.com", "https://cdn.jsdelivr.net"],
-            fontSrc: ["'self'", "https://fonts.gstatic.com", "https://cdn.jsdelivr.net"],
-            imgSrc: ["'self'", "data:", "https:"],
-            connectSrc: ["'self'", "https://lifafa-backend.onrender.com", "https://muskilxlifafa.vercel.app"]
-        }
-    }
 }));
 
-// 2. CORS - Strict origin control
 const allowedOrigins = [
     'https://muskilxlifafa.vercel.app',
     'https://www.muskilxlifafa.vercel.app',
@@ -46,52 +34,37 @@ app.use(cors({
     origin: function(origin, callback) {
         if (!origin) return callback(null, true);
         if (allowedOrigins.indexOf(origin) === -1) {
-            const msg = '❌ CORS policy violation: This origin is not allowed to access this API.';
-            console.log(`Blocked origin: ${origin}`);
-            return callback(new Error(msg), false);
+            return callback(new Error('CORS policy violation'), false);
         }
         return callback(null, true);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-    exposedHeaders: ['Content-Range', 'X-Content-Range'],
-    maxAge: 600
+    allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
 app.options('*', cors());
 
-// 3. Rate Limiting
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 100,
-    message: { success: false, msg: 'Too many requests from this IP, please try again later.' },
-    standardHeaders: true,
-    legacyHeaders: false,
+    message: { success: false, msg: 'Too many requests' }
 });
 
 app.use('/api', (req, res, next) => {
-    if (req.path.startsWith('/auth')) {
-        return next();
-    }
+    if (req.path.startsWith('/auth')) return next();
     limiter(req, res, next);
 });
 
-// 4. Body parsing
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
-
-// 5. Data sanitization
 app.use(mongoSanitize());
 app.use(xss());
-app.use(hpp({
-    whitelist: ['page', 'limit', 'sort']
-}));
+app.use(hpp());
 app.use(compression());
 
-// 6. Logging
 app.use((req, res, next) => {
-    console.log(`${new Date().toISOString()} - ${req.method} ${req.originalUrl} - IP: ${req.ip}`);
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.originalUrl}`);
     next();
 });
 
@@ -116,7 +89,7 @@ requiredEnvVars.forEach(envVar => {
 console.log('✅ Environment variables verified');
 
 // Initialize Telegram Bot
-const bot = telegram.initBot(process.env.TELEGRAM_BOT_TOKEN);
+telegram.initBot(process.env.TELEGRAM_BOT_TOKEN);
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI, {
@@ -124,27 +97,11 @@ mongoose.connect(process.env.MONGODB_URI, {
     useUnifiedTopology: true,
     maxPoolSize: 10,
     minPoolSize: 2,
-    serverSelectionTimeoutMS: 5000,
-    socketTimeoutMS: 45000,
 })
-.then(() => console.log('✅ MongoDB Connected Successfully'))
+.then(() => console.log('✅ MongoDB Connected'))
 .catch(err => {
-    console.error('❌ MongoDB Connection Error:', err);
+    console.error('❌ MongoDB Error:', err);
     process.exit(1);
-});
-
-mongoose.connection.on('error', err => {
-    console.error('❌ MongoDB connection error:', err);
-});
-
-mongoose.connection.on('disconnected', () => {
-    console.log('⚠️ MongoDB disconnected');
-});
-
-process.on('SIGINT', async () => {
-    await mongoose.connection.close();
-    console.log('MongoDB connection closed through app termination');
-    process.exit(0);
 });
 
 // ==================== MODELS ====================
@@ -158,53 +115,50 @@ const UserSchema = new mongoose.Schema({
     isBlocked: { type: Boolean, default: false },
     lastLogin: Date,
     lastLoginIp: String,
-    channels: [{ type: String }], // User's joined channels
-    createdAt: { type: Date, default: Date.now, index: true }
+    channels: [{ type: String }],
+    createdAt: { type: Date, default: Date.now }
 });
 
 const TransactionSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    type: { type: String, enum: ['credit', 'debit', 'withdraw', 'lifafa_created', 'lifafa_claimed'], required: true },
-    amount: { type: Number, required: true, min: 0 },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    type: { type: String, enum: ['credit', 'debit', 'withdraw', 'lifafa_created', 'lifafa_claimed'] },
+    amount: { type: Number, required: true },
     description: String,
-    createdAt: { type: Date, default: Date.now, index: true }
+    createdAt: { type: Date, default: Date.now }
 });
 
 const LifafaSchema = new mongoose.Schema({
-    title: { type: String, required: true, trim: true },
-    code: { type: String, required: true, unique: true, index: true },
-    amount: { type: Number, required: true, min: 1 },
-    numbers: [{ type: String, trim: true }],
-    totalUsers: { type: Number, default: 1, min: 1 },
-    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+    title: { type: String, required: true },
+    code: { type: String, required: true, unique: true },
+    amount: { type: Number, required: true },
+    numbers: [{ type: String }],
+    totalUsers: { type: Number, default: 1 },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     createdByNumber: String,
     isUserCreated: { type: Boolean, default: true },
     claimedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     claimedNumbers: [{ type: String }],
-    claimedCount: { type: Number, default: 0, min: 0 },
-    totalAmount: { type: Number, default: 0, min: 0 },
-    isActive: { type: Boolean, default: true, index: true },
-    
-    // Channel Verification Fields
+    claimedCount: { type: Number, default: 0 },
+    totalAmount: { type: Number, default: 0 },
+    isActive: { type: Boolean, default: true },
+    channels: [{ type: String }],
     channelRequired: { type: Boolean, default: false },
-    channel: { type: String, default: null }, // Channel name (e.g., @channelname)
-    
-    createdAt: { type: Date, default: Date.now, index: true }
+    createdAt: { type: Date, default: Date.now }
 });
 
 const WithdrawalSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     amount: { type: Number, required: true, min: 50 },
-    upiId: { type: String, required: true, trim: true },
-    status: { type: String, enum: ['pending', 'approved', 'rejected', 'refunded'], default: 'pending', index: true },
+    upiId: { type: String, required: true },
+    status: { type: String, enum: ['pending', 'approved', 'rejected', 'refunded'], default: 'pending' },
     processedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin' },
     processedAt: Date,
     remarks: String,
-    createdAt: { type: Date, default: Date.now, index: true }
+    createdAt: { type: Date, default: Date.now }
 });
 
 const CodeSchema = new mongoose.Schema({
-    code: { type: String, required: true, unique: true, index: true },
+    code: { type: String, required: true, unique: true },
     numbers: [{ type: String }],
     createdBy: String,
     createdAt: { type: Date, default: Date.now, expires: 86400 }
@@ -216,71 +170,53 @@ const AdminSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now }
 });
 
+const VerificationSchema = new mongoose.Schema({
+    token: { type: String, required: true, unique: true },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    lifafaCode: { type: String, required: true },
+    channels: [{ type: String }],
+    verifiedChannels: [{ type: String }],
+    createdAt: { type: Date, default: Date.now, expires: 3600 }
+});
+
 const User = mongoose.model('User', UserSchema);
 const Transaction = mongoose.model('Transaction', TransactionSchema);
 const Lifafa = mongoose.model('Lifafa', LifafaSchema);
 const Withdrawal = mongoose.model('Withdrawal', WithdrawalSchema);
 const Code = mongoose.model('Code', CodeSchema);
 const Admin = mongoose.model('Admin', AdminSchema);
-
-// Create indexes
-UserSchema.index({ number: 1 });
-UserSchema.index({ telegramUid: 1 });
-LifafaSchema.index({ code: 1 });
-LifafaSchema.index({ createdBy: 1, isActive: 1 });
-TransactionSchema.index({ userId: 1, createdAt: -1 });
-WithdrawalSchema.index({ userId: 1, status: 1 });
+const Verification = mongoose.model('Verification', VerificationSchema);
 
 // ==================== MIDDLEWARE ====================
 
 const authMiddleware = async (req, res, next) => {
     try {
         const token = req.headers.authorization?.split(' ')[1];
-        if (!token) {
-            return res.status(401).json({ success: false, msg: 'No token provided' });
-        }
+        if (!token) return res.status(401).json({ success: false, msg: 'No token' });
         
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         const user = await User.findById(decoded.userId);
-        
-        if (!user) {
-            return res.status(401).json({ success: false, msg: 'User not found' });
-        }
-        
-        if (user.isBlocked) {
-            return res.status(403).json({ success: false, msg: 'Account is blocked' });
-        }
+        if (!user) return res.status(401).json({ success: false, msg: 'User not found' });
+        if (user.isBlocked) return res.status(403).json({ success: false, msg: 'Account blocked' });
         
         req.userId = decoded.userId;
         req.user = user;
         next();
     } catch(err) {
-        if (err.name === 'TokenExpiredError') {
-            return res.status(401).json({ success: false, msg: 'Token expired' });
-        }
-        if (err.name === 'JsonWebTokenError') {
-            return res.status(401).json({ success: false, msg: 'Invalid token' });
-        }
-        return res.status(401).json({ success: false, msg: 'Authentication failed' });
+        return res.status(401).json({ success: false, msg: 'Invalid token' });
     }
 };
 
 const adminMiddleware = async (req, res, next) => {
     try {
         const token = req.headers.authorization?.split(' ')[1];
-        if (!token) {
-            return res.status(401).json({ success: false, msg: 'No token provided' });
-        }
+        if (!token) return res.status(401).json({ success: false, msg: 'No token' });
         
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         const admin = await Admin.findById(decoded.adminId);
-        
-        if (!admin) {
-            return res.status(403).json({ success: false, msg: 'Not authorized' });
-        }
+        if (!admin) return res.status(403).json({ success: false, msg: 'Not authorized' });
         
         req.adminId = decoded.adminId;
-        req.admin = admin;
         next();
     } catch(err) {
         return res.status(401).json({ success: false, msg: 'Invalid token' });
@@ -292,35 +228,18 @@ const otpStore = new Map();
 setInterval(() => {
     const now = Date.now();
     for (let [key, value] of otpStore.entries()) {
-        if (value.expires < now) {
-            otpStore.delete(key);
-            console.log(`🧹 Cleaned up expired OTP for ${key}`);
-        }
+        if (value.expires < now) otpStore.delete(key);
     }
 }, 5 * 60 * 1000);
 
-// ==================== API ROUTES ====================
+// ==================== TEST ROUTES ====================
 
-// Health check
 app.get('/api/health', (req, res) => {
-    res.json({
-        success: true,
-        status: 'healthy',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime(),
-        environment: process.env.NODE_ENV || 'development'
-    });
+    res.json({ success: true, status: 'healthy', timestamp: new Date().toISOString() });
 });
 
-// Test endpoint
 app.get('/api/test', (req, res) => {
-    res.json({ 
-        success: true, 
-        message: 'Lifafa API is running',
-        timestamp: new Date().toISOString(),
-        version: '1.0.0',
-        environment: process.env.NODE_ENV || 'development'
-    });
+    res.json({ success: true, message: 'Lifafa API is running' });
 });
 
 // ==================== AUTH ROUTES ====================
@@ -328,13 +247,10 @@ app.get('/api/test', (req, res) => {
 app.post('/api/auth/check-number', async (req, res) => {
     try {
         const { number } = req.body;
-        if (!number || !/^\d{10}$/.test(number)) {
-            return res.json({ success: false, msg: 'Invalid number format' });
-        }
+        if (!/^\d{10}$/.test(number)) return res.json({ success: false, msg: 'Invalid number' });
         const user = await User.findOne({ number });
         res.json({ exists: !!user });
     } catch(err) {
-        console.error('Check number error:', err);
         res.status(500).json({ success: false, msg: 'Server error' });
     }
 });
@@ -342,13 +258,9 @@ app.post('/api/auth/check-number', async (req, res) => {
 app.post('/api/auth/check-telegram', async (req, res) => {
     try {
         const { telegramUid } = req.body;
-        if (!telegramUid || typeof telegramUid !== 'string') {
-            return res.json({ success: false, msg: 'Invalid Telegram UID' });
-        }
         const existing = await User.findOne({ telegramUid });
         res.json({ available: !existing });
     } catch(err) {
-        console.error('Check telegram error:', err);
         res.status(500).json({ success: false, msg: 'Server error' });
     }
 });
@@ -357,23 +269,13 @@ app.post('/api/auth/send-otp', async (req, res) => {
     try {
         const { number, telegramUid } = req.body;
         
-        if (!number || !telegramUid) {
-            return res.json({ success: false, msg: 'Number and Telegram UID required' });
-        }
-        
-        if (!/^\d{10}$/.test(number)) {
-            return res.json({ success: false, msg: 'Invalid number format' });
-        }
+        if (!/^\d{10}$/.test(number)) return res.json({ success: false, msg: 'Invalid number' });
         
         const existingUser = await User.findOne({ number });
-        if (existingUser) {
-            return res.json({ success: false, msg: 'Number already registered' });
-        }
+        if (existingUser) return res.json({ success: false, msg: 'Number already registered' });
         
         const existingTelegram = await User.findOne({ telegramUid });
-        if (existingTelegram) {
-            return res.json({ success: false, msg: 'Telegram ID already used' });
-        }
+        if (existingTelegram) return res.json({ success: false, msg: 'Telegram ID already used' });
         
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         
@@ -386,12 +288,11 @@ app.post('/api/auth/send-otp', async (req, res) => {
         const sent = await telegram.sendOTP(telegramUid, otp);
         
         if (sent) {
-            res.json({ success: true, msg: 'OTP sent to your Telegram' });
+            res.json({ success: true, msg: 'OTP sent' });
         } else {
             res.json({ success: false, msg: 'Failed to send OTP' });
         }
     } catch(err) {
-        console.error('Send OTP error:', err);
         res.status(500).json({ success: false, msg: 'Failed to send OTP' });
     }
 });
@@ -400,49 +301,20 @@ app.post('/api/auth/verify-otp', async (req, res) => {
     try {
         const { username, number, password, telegramUid, otp } = req.body;
         
-        if (!username || !number || !password || !telegramUid || !otp) {
-            return res.json({ success: false, msg: 'All fields required' });
-        }
-        
-        if (username.length < 3 || username.length > 20) {
-            return res.json({ success: false, msg: 'Username must be 3-20 characters' });
-        }
-        
-        if (!/^\d{10}$/.test(number)) {
-            return res.json({ success: false, msg: 'Invalid number format' });
-        }
-        
-        if (password.length < 6) {
-            return res.json({ success: false, msg: 'Password must be at least 6 characters' });
-        }
-        
         const stored = otpStore.get(number);
-        if (!stored) {
-            return res.json({ success: false, msg: 'OTP expired or not requested' });
-        }
-        
-        if (stored.otp !== otp) {
-            return res.json({ success: false, msg: 'Invalid OTP' });
-        }
-        
-        if (stored.telegramUid !== telegramUid) {
-            return res.json({ success: false, msg: 'Telegram UID mismatch' });
-        }
-        
+        if (!stored) return res.json({ success: false, msg: 'OTP expired' });
+        if (stored.otp !== otp) return res.json({ success: false, msg: 'Invalid OTP' });
+        if (stored.telegramUid !== telegramUid) return res.json({ success: false, msg: 'Telegram mismatch' });
         if (Date.now() > stored.expires) {
             otpStore.delete(number);
             return res.json({ success: false, msg: 'OTP expired' });
         }
         
         const existingTelegram = await User.findOne({ telegramUid });
-        if (existingTelegram) {
-            return res.json({ success: false, msg: 'Telegram ID already used' });
-        }
+        if (existingTelegram) return res.json({ success: false, msg: 'Telegram ID already used' });
         
         const existingUser = await User.findOne({ number });
-        if (existingUser) {
-            return res.json({ success: false, msg: 'Number already registered' });
-        }
+        if (existingUser) return res.json({ success: false, msg: 'Number already registered' });
         
         const hashedPassword = bcrypt.hashSync(password, 10);
         
@@ -452,7 +324,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
             password: hashedPassword,
             telegramUid,
             balance: 0,
-            channels: [] // Initialize empty channels array
+            channels: []
         });
         
         await user.save();
@@ -466,7 +338,6 @@ app.post('/api/auth/verify-otp', async (req, res) => {
         res.json({ success: true, msg: 'Registration successful' });
         
     } catch(err) {
-        console.error('Verify OTP error:', err);
         res.status(500).json({ success: false, msg: 'Registration failed' });
     }
 });
@@ -475,18 +346,11 @@ app.post('/api/auth/send-login-otp', async (req, res) => {
     try {
         const { number } = req.body;
         
-        if (!number || !/^\d{10}$/.test(number)) {
-            return res.json({ success: false, msg: 'Invalid number format' });
-        }
+        if (!/^\d{10}$/.test(number)) return res.json({ success: false, msg: 'Invalid number' });
         
         const user = await User.findOne({ number });
-        if (!user) {
-            return res.json({ success: false, msg: 'User not found' });
-        }
-        
-        if (user.isBlocked) {
-            return res.json({ success: false, msg: 'Account is blocked' });
-        }
+        if (!user) return res.json({ success: false, msg: 'User not found' });
+        if (user.isBlocked) return res.json({ success: false, msg: 'Account blocked' });
         
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         
@@ -500,12 +364,11 @@ app.post('/api/auth/send-login-otp', async (req, res) => {
         const sent = await telegram.sendOTP(user.telegramUid, otp);
         
         if (sent) {
-            res.json({ success: true, msg: 'OTP sent to your Telegram' });
+            res.json({ success: true, msg: 'OTP sent' });
         } else {
             res.json({ success: false, msg: 'Failed to send OTP' });
         }
     } catch(err) {
-        console.error('Send login OTP error:', err);
         res.status(500).json({ success: false, msg: 'Failed to send OTP' });
     }
 });
@@ -514,28 +377,16 @@ app.post('/api/auth/verify-login-otp', async (req, res) => {
     try {
         const { number, otp, ip } = req.body;
         
-        if (!number || !otp) {
-            return res.json({ success: false, msg: 'Number and OTP required' });
-        }
-        
         const stored = otpStore.get(`login_${number}`);
-        if (!stored) {
-            return res.json({ success: false, msg: 'OTP expired or not requested' });
-        }
-        
-        if (stored.otp !== otp) {
-            return res.json({ success: false, msg: 'Invalid OTP' });
-        }
-        
+        if (!stored) return res.json({ success: false, msg: 'OTP expired' });
+        if (stored.otp !== otp) return res.json({ success: false, msg: 'Invalid OTP' });
         if (Date.now() > stored.expires) {
             otpStore.delete(`login_${number}`);
             return res.json({ success: false, msg: 'OTP expired' });
         }
         
         const user = await User.findById(stored.userId);
-        if (!user) {
-            return res.json({ success: false, msg: 'User not found' });
-        }
+        if (!user) return res.json({ success: false, msg: 'User not found' });
         
         user.lastLogin = new Date();
         user.lastLoginIp = ip;
@@ -559,7 +410,6 @@ app.post('/api/auth/verify-login-otp', async (req, res) => {
         });
         
     } catch(err) {
-        console.error('Verify login OTP error:', err);
         res.status(500).json({ success: false, msg: 'Login failed' });
     }
 });
@@ -567,17 +417,10 @@ app.post('/api/auth/verify-login-otp', async (req, res) => {
 app.post('/api/auth/resend-otp', async (req, res) => {
     try {
         const { number, type } = req.body;
-        
-        if (!number || !type) {
-            return res.json({ success: false, msg: 'Number and type required' });
-        }
-        
         const key = type === 'login' ? `login_${number}` : number;
         const stored = otpStore.get(key);
         
-        if (!stored) {
-            return res.json({ success: false, msg: 'Request OTP first' });
-        }
+        if (!stored) return res.json({ success: false, msg: 'Request OTP first' });
         
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         stored.otp = otp;
@@ -592,137 +435,120 @@ app.post('/api/auth/resend-otp', async (req, res) => {
             res.json({ success: false, msg: 'Failed to resend' });
         }
     } catch(err) {
-        console.error('Resend OTP error:', err);
         res.status(500).json({ success: false, msg: 'Failed to resend' });
     }
 });
 
 // ==================== CHANNEL ROUTES ====================
 
-// Save user channels
-app.post('/api/user/save-channels', authMiddleware, async (req, res) => {
-    try {
-        const { channels } = req.body;
-        const user = req.user;
-        
-        if (!Array.isArray(channels)) {
-            return res.json({ success: false, msg: 'Channels must be an array' });
-        }
-        
-        // Validate channel format
-        const validChannels = channels.filter(c => 
-            typeof c === 'string' && c.startsWith('@') && c.length > 1
-        );
-        
-        user.channels = validChannels;
-        await user.save();
-        
-        res.json({ 
-            success: true, 
-            msg: 'Channels saved successfully',
-            channels: user.channels
-        });
-        
-    } catch(err) {
-        console.error('Save channels error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to save channels' });
-    }
-});
-
-// Get user channels
-app.get('/api/user/channels', authMiddleware, async (req, res) => {
-    try {
-        const user = req.user;
-        res.json({ 
-            success: true, 
-            channels: user.channels || [] 
-        });
-    } catch(err) {
-        console.error('Get channels error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to get channels' });
-    }
-});
-
-// Add single channel
-app.post('/api/user/add-channel', authMiddleware, async (req, res) => {
+app.post('/api/channel/check-admin', async (req, res) => {
     try {
         const { channel } = req.body;
-        const user = req.user;
+        if (!channel) return res.json({ success: false, msg: 'Channel required' });
         
-        if (!channel || typeof channel !== 'string' || !channel.startsWith('@')) {
-            return res.json({ success: false, msg: 'Invalid channel format' });
-        }
+        // In production, call Telegram API to check if bot is admin
+        // For demo, we'll simulate
+        const isAdmin = !channel.includes('invalid');
         
-        if (!user.channels) {
-            user.channels = [];
-        }
-        
-        if (user.channels.includes(channel)) {
-            return res.json({ success: false, msg: 'Channel already exists' });
-        }
-        
-        user.channels.push(channel);
-        await user.save();
-        
-        res.json({ 
-            success: true, 
-            msg: 'Channel added',
-            channels: user.channels
+        res.json({
+            success: true,
+            channel,
+            isAdmin,
+            botUsername: 'LIFAFAXAMITBOT'
         });
-        
     } catch(err) {
-        console.error('Add channel error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to add channel' });
+        res.status(500).json({ success: false, msg: 'Failed to check admin' });
     }
 });
 
-// Remove channel
-app.post('/api/user/remove-channel', authMiddleware, async (req, res) => {
+app.post('/api/channel/generate-verification', authMiddleware, async (req, res) => {
     try {
-        const { channel } = req.body;
-        const user = req.user;
+        const { channels, lifafaCode } = req.body;
+        const userId = req.userId;
         
-        if (!channel) {
-            return res.json({ success: false, msg: 'Channel required' });
+        if (!channels || !Array.isArray(channels) || !lifafaCode) {
+            return res.json({ success: false, msg: 'Missing required fields' });
         }
         
-        user.channels = (user.channels || []).filter(c => c !== channel);
-        await user.save();
+        const token = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
         
-        res.json({ 
-            success: true, 
-            msg: 'Channel removed',
-            channels: user.channels
+        const verification = new Verification({
+            token,
+            userId,
+            lifafaCode,
+            channels,
+            verifiedChannels: []
+        });
+        
+        await verification.save();
+        
+        const baseUrl = process.env.FRONTEND_URL || 'https://muskilxlifafa.vercel.app';
+        const verificationLink = `${baseUrl}/verify-channels?token=${token}`;
+        
+        res.json({
+            success: true,
+            token,
+            verificationLink,
+            botUsername: 'LIFAFAXAMITBOT'
         });
         
     } catch(err) {
-        console.error('Remove channel error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to remove channel' });
+        console.error('Generate verification error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to generate verification' });
     }
 });
 
-// Verify channel membership
-app.post('/api/user/verify-channel', authMiddleware, async (req, res) => {
+app.get('/api/channel/verification-status/:token', async (req, res) => {
     try {
-        const { channel } = req.body;
-        const user = req.user;
+        const { token } = req.params;
         
-        if (!channel) {
-            return res.json({ success: false, msg: 'Channel required' });
+        const verification = await Verification.findOne({ token });
+        if (!verification) {
+            return res.json({ success: false, msg: 'Verification not found' });
         }
         
-        // Check if user has channel in their list
-        const hasChannel = (user.channels || []).includes(channel);
+        const channels = verification.channels.map(name => ({
+            name,
+            verified: verification.verifiedChannels.includes(name)
+        }));
         
-        res.json({ 
-            success: true, 
-            verified: hasChannel,
-            channel
+        const allVerified = channels.every(c => c.verified);
+        
+        res.json({
+            success: true,
+            token,
+            channels,
+            allVerified
         });
         
     } catch(err) {
-        console.error('Verify channel error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to verify channel' });
+        res.status(500).json({ success: false, msg: 'Failed to get status' });
+    }
+});
+
+app.post('/api/channel/mark-verified', async (req, res) => {
+    try {
+        const { token, channel } = req.body;
+        
+        const verification = await Verification.findOne({ token });
+        if (!verification) {
+            return res.json({ success: false, msg: 'Verification not found' });
+        }
+        
+        if (!verification.verifiedChannels.includes(channel)) {
+            verification.verifiedChannels.push(channel);
+            await verification.save();
+        }
+        
+        res.json({
+            success: true,
+            token,
+            channel,
+            verified: true
+        });
+        
+    } catch(err) {
+        res.status(500).json({ success: false, msg: 'Failed to mark verified' });
     }
 });
 
@@ -736,14 +562,9 @@ app.post('/api/tool/generate-code', async (req, res) => {
             return res.json({ success: false, msg: 'Valid numbers required' });
         }
         
-        if (numbers.length > 1000) {
-            return res.json({ success: false, msg: 'Maximum 1000 numbers allowed' });
-        }
-        
         const validNumbers = numbers.filter(n => /^\d{10}$/.test(n));
-        
         if (validNumbers.length === 0) {
-            return res.json({ success: false, msg: 'No valid 10-digit numbers' });
+            return res.json({ success: false, msg: 'No valid numbers' });
         }
         
         const code = 'NUM' + Math.random().toString(36).substring(2, 10).toUpperCase();
@@ -756,14 +577,9 @@ app.post('/api/tool/generate-code', async (req, res) => {
         
         await codeDoc.save();
         
-        res.json({ 
-            success: true, 
-            code,
-            count: validNumbers.length
-        });
+        res.json({ success: true, code, count: validNumbers.length });
         
     } catch(err) {
-        console.error('Generate code error:', err);
         res.status(500).json({ success: false, msg: 'Failed to generate code' });
     }
 });
@@ -771,20 +587,11 @@ app.post('/api/tool/generate-code', async (req, res) => {
 app.get('/api/tool/code/:code', async (req, res) => {
     try {
         const { code } = req.params;
-        
         const codeDoc = await Code.findOne({ code });
-        if (!codeDoc) {
-            return res.json({ success: false, msg: 'Code not found' });
-        }
+        if (!codeDoc) return res.json({ success: false, msg: 'Code not found' });
         
-        res.json({ 
-            success: true, 
-            numbers: codeDoc.numbers,
-            count: codeDoc.numbers.length
-        });
-        
+        res.json({ success: true, numbers: codeDoc.numbers, count: codeDoc.numbers.length });
     } catch(err) {
-        console.error('Fetch code error:', err);
         res.status(500).json({ success: false, msg: 'Error fetching code' });
     }
 });
@@ -825,7 +632,6 @@ app.get('/api/user/dashboard', authMiddleware, async (req, res) => {
             createdLifafas
         });
     } catch(err) {
-        console.error('Dashboard error:', err);
         res.status(500).json({ success: false, msg: 'Error loading dashboard' });
     }
 });
@@ -837,10 +643,6 @@ app.get('/api/user/profile', authMiddleware, async (req, res) => {
         const totalLifafasCreated = await Lifafa.countDocuments({ createdBy: user._id });
         const totalLifafasClaimed = await Lifafa.countDocuments({ claimedBy: user._id });
         const totalTransactions = await Transaction.countDocuments({ userId: user._id });
-        
-        const recentActivity = await Transaction.find({ userId: user._id })
-            .sort('-createdAt')
-            .limit(10);
         
         res.json({
             success: true,
@@ -857,42 +659,11 @@ app.get('/api/user/profile', authMiddleware, async (req, res) => {
                     lifafasCreated: totalLifafasCreated,
                     lifafasClaimed: totalLifafasClaimed,
                     transactions: totalTransactions
-                },
-                recentActivity
+                }
             }
         });
     } catch(err) {
-        console.error('Profile error:', err);
         res.status(500).json({ success: false, msg: 'Error loading profile' });
-    }
-});
-
-app.get('/api/user/transactions', authMiddleware, async (req, res) => {
-    try {
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 20;
-        const skip = (page - 1) * limit;
-        
-        const transactions = await Transaction.find({ userId: req.userId })
-            .sort('-createdAt')
-            .skip(skip)
-            .limit(limit);
-        
-        const total = await Transaction.countDocuments({ userId: req.userId });
-        
-        res.json({ 
-            success: true, 
-            transactions,
-            pagination: {
-                page,
-                limit,
-                total,
-                pages: Math.ceil(total / limit)
-            }
-        });
-    } catch(err) {
-        console.error('Transactions error:', err);
-        res.status(500).json({ success: false, msg: 'Error loading transactions' });
     }
 });
 
@@ -901,34 +672,14 @@ app.post('/api/user/pay', authMiddleware, async (req, res) => {
         const { receiverNumber, amount } = req.body;
         const sender = req.user;
         
-        if (!receiverNumber || !amount) {
-            return res.json({ success: false, msg: 'Receiver number and amount required' });
-        }
-        
-        if (!/^\d{10}$/.test(receiverNumber)) {
-            return res.json({ success: false, msg: 'Invalid receiver number' });
-        }
-        
-        if (amount <= 0 || amount > 100000) {
-            return res.json({ success: false, msg: 'Amount must be between ₹1 and ₹1,00,000' });
-        }
-        
-        if (sender.balance < amount) {
-            return res.json({ success: false, msg: 'Insufficient balance' });
-        }
+        if (!/^\d{10}$/.test(receiverNumber)) return res.json({ success: false, msg: 'Invalid number' });
+        if (amount <= 0 || amount > 100000) return res.json({ success: false, msg: 'Invalid amount' });
+        if (sender.balance < amount) return res.json({ success: false, msg: 'Insufficient balance' });
         
         const receiver = await User.findOne({ number: receiverNumber });
-        if (!receiver) {
-            return res.json({ success: false, msg: 'Receiver not found' });
-        }
-        
-        if (receiver.isBlocked) {
-            return res.json({ success: false, msg: 'Receiver account is blocked' });
-        }
-        
-        if (sender.number === receiverNumber) {
-            return res.json({ success: false, msg: 'Cannot send money to yourself' });
-        }
+        if (!receiver) return res.json({ success: false, msg: 'Receiver not found' });
+        if (receiver.isBlocked) return res.json({ success: false, msg: 'Receiver blocked' });
+        if (sender.number === receiverNumber) return res.json({ success: false, msg: 'Cannot send to self' });
         
         sender.balance -= amount;
         receiver.balance += amount;
@@ -961,7 +712,6 @@ app.post('/api/user/pay', authMiddleware, async (req, res) => {
         res.json({ success: true, msg: 'Payment successful', newBalance: sender.balance });
         
     } catch(err) {
-        console.error('Pay error:', err);
         res.status(500).json({ success: false, msg: 'Payment failed' });
     }
 });
@@ -971,30 +721,10 @@ app.post('/api/user/withdraw', authMiddleware, async (req, res) => {
         const { amount, upiId } = req.body;
         const user = req.user;
         
-        if (!amount || amount < 50) {
-            return res.json({ success: false, msg: 'Minimum withdrawal amount is ₹50' });
-        }
-        
-        if (amount > 50000) {
-            return res.json({ success: false, msg: 'Maximum withdrawal amount is ₹50,000' });
-        }
-        
-        if (!upiId || !/^[\w\.\-]+@[\w\.\-]+$/.test(upiId)) {
-            return res.json({ success: false, msg: 'Invalid UPI ID format' });
-        }
-        
-        if (user.balance < amount) {
-            return res.json({ success: false, msg: 'Insufficient balance' });
-        }
-        
-        const pendingWithdrawals = await Withdrawal.countDocuments({
-            userId: user._id,
-            status: 'pending'
-        });
-        
-        if (pendingWithdrawals >= 3) {
-            return res.json({ success: false, msg: 'You have too many pending withdrawals' });
-        }
+        if (amount < 50) return res.json({ success: false, msg: 'Minimum ₹50' });
+        if (amount > 50000) return res.json({ success: false, msg: 'Maximum ₹50,000' });
+        if (!/^[\w\.\-]+@[\w\.\-]+$/.test(upiId)) return res.json({ success: false, msg: 'Invalid UPI' });
+        if (user.balance < amount) return res.json({ success: false, msg: 'Insufficient balance' });
         
         const withdrawal = new Withdrawal({
             userId: user._id,
@@ -1011,68 +741,47 @@ app.post('/api/user/withdraw', authMiddleware, async (req, res) => {
             userId: user._id,
             type: 'debit',
             amount,
-            description: `Withdrawal request to ${upiId}`
+            description: `Withdrawal to ${upiId}`
         }).save();
         
         await telegram.sendWithdrawalAlert(user.telegramUid, amount, 'pending');
         
-        res.json({ success: true, msg: 'Withdrawal request submitted', newBalance: user.balance });
+        res.json({ success: true, msg: 'Withdrawal requested', newBalance: user.balance });
         
     } catch(err) {
-        console.error('Withdraw error:', err);
         res.status(500).json({ success: false, msg: 'Withdrawal failed' });
     }
 });
 
 app.get('/api/user/withdrawals', authMiddleware, async (req, res) => {
     try {
-        const withdrawals = await Withdrawal.find({ userId: req.userId })
-            .sort('-createdAt')
-            .limit(20);
-        
+        const withdrawals = await Withdrawal.find({ userId: req.userId }).sort('-createdAt');
         res.json({ success: true, withdrawals });
     } catch(err) {
-        console.error('Withdrawals error:', err);
         res.status(500).json({ success: false, msg: 'Error loading withdrawals' });
     }
 });
 
 app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
     try {
-        const { title, amount, code, numbers, userCount, channel, channelRequired } = req.body;
+        const { title, amount, code, numbers, userCount, channels, channelRequired } = req.body;
         const user = req.user;
         
         if (!title || !amount || amount <= 0) {
-            return res.json({ success: false, msg: 'Title and valid amount required' });
+            return res.json({ success: false, msg: 'Title and amount required' });
         }
         
-        if (title.length < 3 || title.length > 50) {
-            return res.json({ success: false, msg: 'Title must be 3-50 characters' });
-        }
-        
-        if (amount < 1 || amount > 10000) {
-            return res.json({ success: false, msg: 'Amount must be between ₹1 and ₹10,000' });
-        }
-        
-        // Get numbers from code if provided
         let allowedNumbers = [];
         if (code) {
             const codeDoc = await Code.findOne({ code });
-            if (codeDoc) {
-                allowedNumbers = codeDoc.numbers;
-            }
+            if (codeDoc) allowedNumbers = codeDoc.numbers;
         } else if (numbers && numbers.trim()) {
             allowedNumbers = numbers
                 .split(/[\n,]+/)
                 .map(n => n.trim())
                 .filter(n => /^\d{10}$/.test(n));
-            
-            if (allowedNumbers.length > 100) {
-                return res.json({ success: false, msg: 'Maximum 100 numbers allowed' });
-            }
         }
         
-        // Calculate total users
         let totalUsers = 1;
         let lifafaType = 'public_unlimited';
         
@@ -1081,24 +790,18 @@ app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
             lifafaType = 'private';
         } else if (userCount && parseInt(userCount) > 0) {
             totalUsers = parseInt(userCount);
-            if (totalUsers > 1000) {
-                return res.json({ success: false, msg: 'Maximum 1000 users allowed' });
-            }
             lifafaType = 'public_limited';
         } else if (numbers && numbers.trim()) {
             const manualNumbers = numbers.split('\n').filter(n => n.trim());
             allowedNumbers = manualNumbers;
             totalUsers = manualNumbers.length;
-            if (totalUsers > 100) {
-                return res.json({ success: false, msg: 'Maximum 100 numbers allowed' });
-            }
             lifafaType = 'private';
         }
         
         const totalCost = amount * totalUsers;
         
         if (user.balance < totalCost) {
-            return res.json({ success: false, msg: `Insufficient balance. Required: ₹${totalCost}` });
+            return res.json({ success: false, msg: `Required: ₹${totalCost}` });
         }
         
         const lifafaCode = 'LIF' + Math.random().toString(36).substring(2, 10).toUpperCase();
@@ -1115,8 +818,8 @@ app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
             isActive: true,
             claimedCount: 0,
             claimedNumbers: [],
-            channelRequired: channelRequired || false,
-            channel: channel || null
+            channels: channels || [],
+            channelRequired: channelRequired || false
         });
         
         await lifafa.save();
@@ -1128,7 +831,7 @@ app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
             userId: user._id,
             type: 'debit',
             amount: totalCost,
-            description: `Created ${lifafaType} Lifafa: ${title} (${totalUsers} users)${channelRequired ? ' with channel verification' : ''}`
+            description: `Created ${lifafaType} Lifafa: ${title}`
         }).save();
         
         const baseUrl = process.env.FRONTEND_URL || 'https://muskilxlifafa.vercel.app';
@@ -1136,47 +839,43 @@ app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
         
         let message = `🎁 *Lifafa Created!*\n\n*Title:* ${title}\n*Amount:* ₹${amount}`;
         if (lifafaType === 'private') {
-            message += `\n*Type:* Private (${totalUsers} specific users)`;
+            message += `\n*Type:* Private (${totalUsers} users)`;
         } else if (lifafaType === 'public_limited') {
             message += `\n*Type:* Public Limited (${totalUsers} spots)`;
         } else {
             message += `\n*Type:* Public Unlimited`;
         }
-        if (channelRequired && channel) {
-            message += `\n*Channel:* ${channel}`;
+        if (channels && channels.length > 0) {
+            message += `\n*Channels:* ${channels.join(', ')}`;
         }
-        message += `\n*Total Cost:* ₹${totalCost}\n*Code:* \`${lifafaCode}\`\n*Link:* ${shareableLink}`;
+        message += `\n*Code:* \`${lifafaCode}\`\n*Link:* ${shareableLink}`;
         
         await telegram.sendMessage(user.telegramUid, message, { parse_mode: 'Markdown' });
         
         res.json({ 
             success: true, 
-            msg: 'Lifafa created successfully',
+            msg: 'Lifafa created',
             code: lifafaCode,
             link: shareableLink,
             totalUsers,
             totalCost,
             newBalance: user.balance,
             type: lifafaType,
-            channelRequired,
-            channel
+            channels,
+            channelRequired
         });
         
     } catch(err) {
         console.error('Create lifafa error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to create lifafa' });
+        res.status(500).json({ success: false, msg: 'Failed to create' });
     }
 });
 
 app.get('/api/user/my-lifafas', authMiddleware, async (req, res) => {
     try {
-        const lifafas = await Lifafa.find({ createdBy: req.userId })
-            .sort('-createdAt')
-            .limit(50);
-        
+        const lifafas = await Lifafa.find({ createdBy: req.userId }).sort('-createdAt');
         res.json({ success: true, lifafas });
     } catch(err) {
-        console.error('My lifafas error:', err);
         res.status(500).json({ success: false, msg: 'Error loading lifafas' });
     }
 });
@@ -1186,9 +885,7 @@ app.post('/api/user/unclaimed-lifafas', authMiddleware, async (req, res) => {
         const { number } = req.body;
         const user = req.user;
         
-        if (!number || number !== user.number) {
-            return res.json({ success: false, msg: 'Invalid number' });
-        }
+        if (!number || number !== user.number) return res.json({ success: false, msg: 'Invalid number' });
         
         const lifafas = await Lifafa.find({
             isActive: true,
@@ -1207,7 +904,7 @@ app.post('/api/user/unclaimed-lifafas', authMiddleware, async (req, res) => {
                 title: l.title,
                 amount: l.amount,
                 code: l.code,
-                channel: l.channel,
+                channels: l.channels,
                 channelRequired: l.channelRequired,
                 isPublic: false,
                 totalUsers: l.totalUsers || 1,
@@ -1216,8 +913,7 @@ app.post('/api/user/unclaimed-lifafas', authMiddleware, async (req, res) => {
         });
         
     } catch(err) {
-        console.error('Unclaimed lifafas error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to fetch lifafas' });
+        res.status(500).json({ success: false, msg: 'Failed to fetch' });
     }
 });
 
@@ -1226,22 +922,12 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
         const { code } = req.body;
         const user = req.user;
         
-        if (!code || !/^LIF[A-Z0-9]+$/.test(code)) {
-            return res.json({ success: false, msg: 'Invalid code format' });
-        }
-        
         const lifafa = await Lifafa.findOne({ code, isActive: true });
-        if (!lifafa) {
-            return res.json({ success: false, msg: 'Invalid or expired code' });
-        }
+        if (!lifafa) return res.json({ success: false, msg: 'Invalid code' });
         
-        // Check eligibility
         if (lifafa.numbers && lifafa.numbers.length > 0) {
             if (!lifafa.numbers.includes(user.number)) {
-                return res.json({ 
-                    success: false, 
-                    msg: 'This is a private lifafa and you are not eligible to claim it' 
-                });
+                return res.json({ success: false, msg: 'Not eligible' });
             }
         }
         
@@ -1249,20 +935,21 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
             return res.json({ success: false, msg: 'Already claimed' });
         }
         
-        // Check channel verification if required
-        if (lifafa.channelRequired && lifafa.channel) {
+        if (lifafa.channelRequired && lifafa.channels && lifafa.channels.length > 0) {
             const userChannels = user.channels || [];
-            if (!userChannels.includes(lifafa.channel)) {
+            const missingChannels = lifafa.channels.filter(c => !userChannels.includes(c));
+            if (missingChannels.length > 0) {
                 return res.json({ 
                     success: false, 
-                    msg: `You must join ${lifafa.channel} first` 
+                    msg: 'Channels not verified',
+                    missingChannels
                 });
             }
         }
         
         const totalAllowed = lifafa.totalUsers || lifafa.numbers?.length || 999999;
         if (lifafa.claimedCount >= totalAllowed) {
-            return res.json({ success: false, msg: 'This lifafa is fully claimed' });
+            return res.json({ success: false, msg: 'Fully claimed' });
         }
         
         user.balance += lifafa.amount;
@@ -1283,7 +970,7 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
             userId: user._id,
             type: 'credit',
             amount: lifafa.amount,
-            description: `Claimed Lifafa: ${lifafa.title}`
+            description: `Claimed: ${lifafa.title}`
         }).save();
         
         await telegram.sendLifafaClaimAlert(user.telegramUid, lifafa, user.balance);
@@ -1291,95 +978,8 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
         res.json({ success: true, amount: lifafa.amount, newBalance: user.balance });
         
     } catch(err) {
-        console.error('Claim lifafa error:', err);
+        console.error('Claim error:', err);
         res.status(500).json({ success: false, msg: 'Claim failed' });
-    }
-});
-
-app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
-    try {
-        const { number } = req.body;
-        const user = req.user;
-        
-        if (!number || number !== user.number) {
-            return res.json({ success: false, msg: 'Invalid number' });
-        }
-        
-        const lifafas = await Lifafa.find({
-            isActive: true,
-            $and: [
-                { numbers: number },
-                { numbers: { $ne: [] } },
-                { numbers: { $exists: true } }
-            ],
-            claimedNumbers: { $ne: number }
-        });
-        
-        if (lifafas.length === 0) {
-            return res.json({ success: false, msg: 'No unclaimed private lifafas' });
-        }
-        
-        if (lifafas.length > 10) {
-            return res.json({ success: false, msg: 'Cannot claim more than 10 lifafas at once' });
-        }
-        
-        let totalAmount = 0;
-        const claimedLifafas = [];
-        
-        for (const lifafa of lifafas) {
-            // Check channel verification for each lifafa
-            if (lifafa.channelRequired && lifafa.channel) {
-                const userChannels = user.channels || [];
-                if (!userChannels.includes(lifafa.channel)) {
-                    return res.json({ 
-                        success: false, 
-                        msg: `You must join ${lifafa.channel} first` 
-                    });
-                }
-            }
-            
-            totalAmount += lifafa.amount;
-            claimedLifafas.push(lifafa.title);
-            
-            lifafa.claimedBy.push(user._id);
-            lifafa.claimedNumbers.push(number);
-            lifafa.claimedCount++;
-            lifafa.totalAmount += lifafa.amount;
-            
-            const totalAllowed = lifafa.totalUsers || lifafa.numbers?.length || 999999;
-            if (lifafa.claimedCount >= totalAllowed) {
-                lifafa.isActive = false;
-            }
-            
-            await lifafa.save();
-        }
-        
-        user.balance += totalAmount;
-        await user.save();
-        
-        await new Transaction({
-            userId: user._id,
-            type: 'credit',
-            amount: totalAmount,
-            description: `Bulk claimed ${lifafas.length} private lifafas`
-        }).save();
-        
-        await telegram.sendMessage(user.telegramUid,
-            `🎊 *Bulk Claim Successful!*\n\n*Total Private Lifafas:* ${lifafas.length}\n*Total Amount:* +₹${totalAmount}\n*New Balance:* ₹${user.balance}`,
-            { parse_mode: 'Markdown' }
-        );
-        
-        res.json({ 
-            success: true, 
-            totalLifafas: lifafas.length, 
-            totalAmount, 
-            newBalance: user.balance,
-            claimed: claimedLifafas
-        });
-        
-    } catch(err) {
-        console.error('Claim all error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to claim all' });
     }
 });
 
@@ -1389,15 +989,8 @@ app.get('/api/lifafa/:code', async (req, res) => {
     try {
         const { code } = req.params;
         
-        if (!code || !/^LIF[A-Z0-9]+$/.test(code)) {
-            return res.json({ success: false, msg: 'Invalid code format' });
-        }
-        
         const lifafa = await Lifafa.findOne({ code }).populate('createdBy', 'username number');
-
-        if (!lifafa) {
-            return res.json({ success: false, msg: 'Lifafa not found' });
-        }
+        if (!lifafa) return res.json({ success: false, msg: 'Lifafa not found' });
 
         let type = 'public_unlimited';
         let totalAllowed = 1;
@@ -1418,7 +1011,7 @@ app.get('/api/lifafa/:code', async (req, res) => {
                 title: lifafa.title,
                 amount: lifafa.amount,
                 code: lifafa.code,
-                channel: lifafa.channel,
+                channels: lifafa.channels || [],
                 channelRequired: lifafa.channelRequired || false,
                 numbers: lifafa.numbers,
                 totalUsers: lifafa.totalUsers || 1,
@@ -1434,8 +1027,7 @@ app.get('/api/lifafa/:code', async (req, res) => {
             }
         });
     } catch(err) {
-        console.error('Error in /api/lifafa/:code', err);
-        res.status(500).json({ success: false, msg: 'Server error loading lifafa' });
+        res.status(500).json({ success: false, msg: 'Server error' });
     }
 });
 
@@ -1443,38 +1035,16 @@ app.post('/api/lifafa/claim', async (req, res) => {
     try {
         const { code, number } = req.body;
         
-        if (!code || !number) {
-            return res.json({ success: false, msg: 'Code and number required' });
-        }
-        
-        if (!/^LIF[A-Z0-9]+$/.test(code)) {
-            return res.json({ success: false, msg: 'Invalid code format' });
-        }
-        
-        if (!/^\d{10}$/.test(number)) {
-            return res.json({ success: false, msg: 'Invalid number format' });
-        }
-        
         const user = await User.findOne({ number });
-        if (!user) {
-            return res.json({ success: false, msg: 'User not found. Please register first.' });
-        }
-        
-        if (user.isBlocked) {
-            return res.json({ success: false, msg: 'Account blocked' });
-        }
+        if (!user) return res.json({ success: false, msg: 'User not found' });
+        if (user.isBlocked) return res.json({ success: false, msg: 'Account blocked' });
         
         const lifafa = await Lifafa.findOne({ code, isActive: true });
-        if (!lifafa) {
-            return res.json({ success: false, msg: 'Invalid or expired code' });
-        }
+        if (!lifafa) return res.json({ success: false, msg: 'Invalid code' });
         
         if (lifafa.numbers && lifafa.numbers.length > 0) {
             if (!lifafa.numbers.includes(number)) {
-                return res.json({ 
-                    success: false, 
-                    msg: 'This private lifafa is not for you' 
-                });
+                return res.json({ success: false, msg: 'Not eligible' });
             }
         }
         
@@ -1482,13 +1052,14 @@ app.post('/api/lifafa/claim', async (req, res) => {
             return res.json({ success: false, msg: 'Already claimed' });
         }
         
-        // Check channel verification if required
-        if (lifafa.channelRequired && lifafa.channel) {
+        if (lifafa.channelRequired && lifafa.channels && lifafa.channels.length > 0) {
             const userChannels = user.channels || [];
-            if (!userChannels.includes(lifafa.channel)) {
+            const missingChannels = lifafa.channels.filter(c => !userChannels.includes(c));
+            if (missingChannels.length > 0) {
                 return res.json({ 
                     success: false, 
-                    msg: `You must join ${lifafa.channel} first` 
+                    msg: 'Channels not verified',
+                    missingChannels
                 });
             }
         }
@@ -1497,7 +1068,7 @@ app.post('/api/lifafa/claim', async (req, res) => {
         if (lifafa.claimedCount >= totalAllowed) {
             lifafa.isActive = false;
             await lifafa.save();
-            return res.json({ success: false, msg: 'This lifafa is fully claimed' });
+            return res.json({ success: false, msg: 'Fully claimed' });
         }
         
         user.balance += lifafa.amount;
@@ -1518,7 +1089,7 @@ app.post('/api/lifafa/claim', async (req, res) => {
             userId: user._id,
             type: 'credit',
             amount: lifafa.amount,
-            description: `Claimed Lifafa: ${lifafa.title}`
+            description: `Claimed: ${lifafa.title}`
         }).save();
         
         res.json({ success: true, amount: lifafa.amount, newBalance: user.balance });
@@ -1529,782 +1100,21 @@ app.post('/api/lifafa/claim', async (req, res) => {
     }
 });
 
-// ==================== ADMIN ROUTES ====================
-
-app.post('/api/admin/login', async (req, res) => {
-    try {
-        const { username, password } = req.body;
-        
-        if (!username || !password) {
-            return res.json({ success: false, msg: 'Username and password required' });
-        }
-        
-        let admin = await Admin.findOne({ username });
-        
-        if (!admin && username === process.env.ADMIN_USERNAME) {
-            const hashedPassword = bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10);
-            admin = new Admin({ username, password: hashedPassword });
-            await admin.save();
-            console.log('👑 Default admin created');
-        }
-        
-        if (!admin) {
-            return res.json({ success: false, msg: 'Admin not found' });
-        }
-        
-        const valid = bcrypt.compareSync(password, admin.password);
-        if (!valid) {
-            return res.json({ success: false, msg: 'Invalid password' });
-        }
-        
-        const token = jwt.sign({ adminId: admin._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
-        
-        res.json({ success: true, token });
-    } catch(err) {
-        console.error('Admin login error:', err);
-        res.status(500).json({ success: false, msg: 'Login failed' });
-    }
-});
-
-app.get('/api/admin/stats', adminMiddleware, async (req, res) => {
-    try {
-        const totalUsers = await User.countDocuments();
-        const activeUsers = await User.countDocuments({ isBlocked: false });
-        const totalLifafas = await Lifafa.countDocuments();
-        const activeLifafas = await Lifafa.countDocuments({ isActive: true });
-        const pendingWithdrawals = await Withdrawal.countDocuments({ status: 'pending' });
-        const totalBalance = await User.aggregate([{ $group: { _id: null, total: { $sum: '$balance' } } }]);
-        
-        res.json({
-            success: true,
-            stats: {
-                users: { total: totalUsers, active: activeUsers },
-                lifafas: { total: totalLifafas, active: activeLifafas },
-                withdrawals: { pending: pendingWithdrawals },
-                totalBalance: totalBalance[0]?.total || 0
-            }
-        });
-    } catch(err) {
-        console.error('Admin stats error:', err);
-        res.status(500).json({ success: false, msg: 'Error loading stats' });
-    }
-});
-
-app.get('/api/admin/users', adminMiddleware, async (req, res) => {
-    try {
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 20;
-        const skip = (page - 1) * limit;
-        const search = req.query.search || '';
-        
-        let query = {};
-        if (search) {
-            query = {
-                $or: [
-                    { number: { $regex: search, $options: 'i' } },
-                    { username: { $regex: search, $options: 'i' } },
-                    { telegramUid: { $regex: search, $options: 'i' } }
-                ]
-            };
-        }
-        
-        const users = await User.find(query)
-            .select('-password')
-            .sort('-createdAt')
-            .skip(skip)
-            .limit(limit);
-        
-        const total = await User.countDocuments(query);
-        
-        res.json({
-            success: true,
-            users,
-            pagination: {
-                page,
-                limit,
-                total,
-                pages: Math.ceil(total / limit)
-            }
-        });
-    } catch(err) {
-        console.error('Get users error:', err);
-        res.status(500).json({ success: false, msg: 'Error loading users' });
-    }
-});
-
-app.get('/api/admin/users/:id', adminMiddleware, async (req, res) => {
-    try {
-        const user = await User.findById(req.params.id).select('-password');
-        if (!user) {
-            return res.json({ success: false, msg: 'User not found' });
-        }
-        
-        const transactions = await Transaction.find({ userId: user._id })
-            .sort('-createdAt')
-            .limit(20);
-        
-        const withdrawals = await Withdrawal.find({ userId: user._id })
-            .sort('-createdAt');
-        
-        const createdLifafas = await Lifafa.find({ createdBy: user._id })
-            .sort('-createdAt');
-        
-        res.json({
-            success: true,
-            user,
-            transactions,
-            withdrawals,
-            createdLifafas
-        });
-    } catch(err) {
-        console.error('Get user error:', err);
-        res.status(500).json({ success: false, msg: 'Error loading user' });
-    }
-});
-
-app.post('/api/admin/user-balance', adminMiddleware, async (req, res) => {
-    try {
-        const { number, amount, action, reason } = req.body;
-        
-        if (!number || !amount || !action) {
-            return res.json({ success: false, msg: 'Number, amount and action required' });
-        }
-        
-        if (!/^\d{10}$/.test(number)) {
-            return res.json({ success: false, msg: 'Invalid number format' });
-        }
-        
-        if (amount <= 0 || amount > 1000000) {
-            return res.json({ success: false, msg: 'Amount must be between ₹1 and ₹10,00,000' });
-        }
-        
-        const user = await User.findOne({ number });
-        if (!user) {
-            return res.json({ success: false, msg: 'User not found' });
-        }
-        
-        let transactionType;
-        let description;
-        
-        if (action === 'add') {
-            user.balance += amount;
-            transactionType = 'credit';
-            description = reason || 'Admin credited';
-        } else if (action === 'deduct') {
-            if (user.balance < amount) {
-                return res.json({ success: false, msg: 'Insufficient balance' });
-            }
-            user.balance -= amount;
-            transactionType = 'debit';
-            description = reason || 'Admin debited';
-        } else {
-            return res.json({ success: false, msg: 'Invalid action' });
-        }
-        
-        await user.save();
-        
-        await new Transaction({
-            userId: user._id,
-            type: transactionType,
-            amount,
-            description
-        }).save();
-        
-        await telegram.sendTransactionAlert(
-            user.telegramUid, transactionType, amount, user.balance, description
-        );
-        
-        res.json({ 
-            success: true, 
-            msg: `Balance ${action}ed successfully`,
-            newBalance: user.balance
-        });
-        
-    } catch(err) {
-        console.error('Balance update error:', err);
-        res.status(500).json({ success: false, msg: 'Operation failed' });
-    }
-});
-
-app.post('/api/admin/block-user', adminMiddleware, async (req, res) => {
-    try {
-        const { number, block, reason } = req.body;
-        
-        if (!number) {
-            return res.json({ success: false, msg: 'Number required' });
-        }
-        
-        if (!/^\d{10}$/.test(number)) {
-            return res.json({ success: false, msg: 'Invalid number format' });
-        }
-        
-        const user = await User.findOne({ number });
-        if (!user) {
-            return res.json({ success: false, msg: 'User not found' });
-        }
-        
-        user.isBlocked = block;
-        await user.save();
-        
-        await telegram.sendMessage(user.telegramUid,
-            `🚫 *Account ${block ? 'Blocked' : 'Unblocked'}*\n\n${reason ? `Reason: ${reason}` : ''}`,
-            { parse_mode: 'Markdown' }
-        );
-        
-        res.json({ success: true, msg: `User ${block ? 'blocked' : 'unblocked'}` });
-    } catch(err) {
-        console.error('Block user error:', err);
-        res.status(500).json({ success: false, msg: 'Operation failed' });
-    }
-});
-
-app.post('/api/admin/create-lifafa', adminMiddleware, async (req, res) => {
-    try {
-        const { title, amount, numbers, channelRequired, channel } = req.body;
-        
-        if (!title || !amount) {
-            return res.json({ success: false, msg: 'Title and amount required' });
-        }
-        
-        if (title.length < 3 || title.length > 50) {
-            return res.json({ success: false, msg: 'Title must be 3-50 characters' });
-        }
-        
-        if (amount <= 0 || amount > 100000) {
-            return res.json({ success: false, msg: 'Amount must be between ₹1 and ₹1,00,000' });
-        }
-        
-        const code = 'LIF' + Math.random().toString(36).substring(2, 10).toUpperCase();
-        
-        const allowedNumbers = numbers ? numbers.split(/[\n,]+/).map(n => n.trim()).filter(n => /^\d{10}$/.test(n)) : [];
-        
-        if (allowedNumbers.length > 1000) {
-            return res.json({ success: false, msg: 'Maximum 1000 numbers allowed' });
-        }
-        
-        const lifafa = new Lifafa({
-            title,
-            amount,
-            code,
-            numbers: allowedNumbers,
-            createdBy: req.adminId,
-            isUserCreated: false,
-            channelRequired: channelRequired || false,
-            channel: channel || null
-        });
-        
-        await lifafa.save();
-        
-        res.json({ 
-            success: true, 
-            msg: 'Lifafa created', 
-            code,
-            channelRequired,
-            channel
-        });
-        
-    } catch(err) {
-        console.error('Create lifafa error:', err);
-        res.status(500).json({ success: false, msg: 'Creation failed' });
-    }
-});
-
-app.get('/api/admin/withdrawals', adminMiddleware, async (req, res) => {
-    try {
-        const status = req.query.status;
-        let query = {};
-        if (status && ['pending', 'approved', 'rejected', 'refunded'].includes(status)) {
-            query.status = status;
-        }
-        
-        const withdrawals = await Withdrawal.find(query)
-            .populate('userId', 'number username')
-            .sort('-createdAt')
-            .limit(100);
-        
-        res.json({ success: true, withdrawals });
-    } catch(err) {
-        console.error('Get withdrawals error:', err);
-        res.status(500).json({ success: false, msg: 'Error loading withdrawals' });
-    }
-});
-
-app.post('/api/admin/update-withdrawal', adminMiddleware, async (req, res) => {
-    try {
-        const { withdrawalId, status, remarks } = req.body;
-        
-        if (!withdrawalId || !status) {
-            return res.json({ success: false, msg: 'Withdrawal ID and status required' });
-        }
-        
-        if (!['approved', 'rejected', 'refunded'].includes(status)) {
-            return res.json({ success: false, msg: 'Invalid status' });
-        }
-        
-        const withdrawal = await Withdrawal.findById(withdrawalId).populate('userId');
-        if (!withdrawal) {
-            return res.json({ success: false, msg: 'Withdrawal not found' });
-        }
-        
-        const oldStatus = withdrawal.status;
-        withdrawal.status = status;
-        withdrawal.processedBy = req.adminId;
-        withdrawal.processedAt = new Date();
-        if (remarks) withdrawal.remarks = remarks;
-        
-        await withdrawal.save();
-        
-        if (status === 'refunded' && oldStatus === 'pending') {
-            withdrawal.userId.balance += withdrawal.amount;
-            await withdrawal.userId.save();
-            
-            await new Transaction({
-                userId: withdrawal.userId._id,
-                type: 'credit',
-                amount: withdrawal.amount,
-                description: 'Withdrawal refunded'
-            }).save();
-        }
-        
-        await telegram.sendWithdrawalAlert(withdrawal.userId.telegramUid, withdrawal.amount, status);
-        
-        res.json({ success: true, msg: `Withdrawal ${status}` });
-    } catch(err) {
-        console.error('Update withdrawal error:', err);
-        res.status(500).json({ success: false, msg: 'Update failed' });
-    }
-});
-
-app.get('/api/admin/logs', adminMiddleware, async (req, res) => {
-    try {
-        const logs = await Transaction.find()
-            .populate('userId', 'number')
-            .sort('-createdAt')
-            .limit(100);
-            
-        res.json({ 
-            success: true,
-            logs: logs.map(l => ({
-                id: l._id,
-                type: l.type,
-                user: l.userId?.number || 'Unknown',
-                amount: l.amount,
-                description: l.description,
-                time: l.createdAt
-            }))
-        });
-    } catch(err) {
-        console.error('Get logs error:', err);
-        res.status(500).json({ success: false, msg: 'Error loading logs' });
-    }
-});
-
-// ==================== ADMIN - LIFAFA OVER & REFUND ====================
-
-app.get('/api/admin/all-lifafas', adminMiddleware, async (req, res) => {
-    try {
-        const lifafas = await Lifafa.find()
-            .populate('createdBy', 'username number')
-            .sort('-createdAt')
-            .limit(100);
-        
-        res.json({ success: true, lifafas });
-    } catch(err) {
-        console.error('Get all lifafas error:', err);
-        res.status(500).json({ success: false, msg: 'Error loading lifafas' });
-    }
-});
-
-app.post('/api/admin/lifafa-over', adminMiddleware, async (req, res) => {
-    try {
-        const { lifafaId, reason } = req.body;
-        
-        if (!lifafaId) {
-            return res.json({ success: false, msg: 'Lifafa ID required' });
-        }
-        
-        const lifafa = await Lifafa.findById(lifafaId).populate('createdBy');
-        
-        if (!lifafa) {
-            return res.json({ success: false, msg: 'Lifafa not found' });
-        }
-        
-        if (!lifafa.isActive) {
-            return res.json({ success: false, msg: 'Lifafa is already over' });
-        }
-        
-        const totalUsers = lifafa.totalUsers || lifafa.numbers?.length || 1;
-        const claimedUsers = lifafa.claimedCount || 0;
-        const remainingUsers = totalUsers - claimedUsers;
-        const remainingAmount = lifafa.amount * remainingUsers;
-        
-        if (lifafa.createdBy && remainingAmount > 0) {
-            lifafa.createdBy.balance += remainingAmount;
-            await lifafa.createdBy.save();
-            
-            await new Transaction({
-                userId: lifafa.createdBy._id,
-                type: 'credit',
-                amount: remainingAmount,
-                description: `Refund for lifafa: ${lifafa.title} (${remainingUsers} unclaimed)`
-            }).save();
-            
-            await telegram.sendMessage(lifafa.createdBy.telegramUid,
-                `💰 *Lifafa Refund*\n\n` +
-                `Your lifafa "${lifafa.title}" has been marked as over.\n` +
-                `Remaining amount: ₹${remainingAmount} (${remainingUsers} unclaimed users)\n` +
-                `has been refunded to your balance.`,
-                { parse_mode: 'Markdown' }
-            );
-        }
-        
-        lifafa.isActive = false;
-        await lifafa.save();
-        
-        res.json({ 
-            success: true, 
-            msg: 'Lifafa marked as over',
-            remainingUsers,
-            remainingAmount,
-            refunded: remainingAmount > 0
-        });
-        
-    } catch(err) {
-        console.error('Lifafa over error:', err);
-        res.status(500).json({ success: false, msg: 'Operation failed' });
-    }
-});
-
-app.get('/api/admin/lifafa/:id', adminMiddleware, async (req, res) => {
-    try {
-        const lifafa = await Lifafa.findById(req.params.id)
-            .populate('createdBy', 'username number telegramUid balance')
-            .populate('claimedBy', 'username number');
-        
-        if (!lifafa) {
-            return res.json({ success: false, msg: 'Lifafa not found' });
-        }
-        
-        const totalUsers = lifafa.totalUsers || lifafa.numbers?.length || 1;
-        const claimedUsers = lifafa.claimedCount || 0;
-        const remainingUsers = totalUsers - claimedUsers;
-        const remainingAmount = lifafa.amount * remainingUsers;
-        
-        res.json({
-            success: true,
-            lifafa: {
-                ...lifafa.toObject(),
-                stats: {
-                    totalUsers,
-                    claimedUsers,
-                    remainingUsers,
-                    totalAmount: lifafa.amount * totalUsers,
-                    claimedAmount: lifafa.amount * claimedUsers,
-                    remainingAmount
-                }
-            }
-        });
-    } catch(err) {
-        console.error('Get lifafa error:', err);
-        res.status(500).json({ success: false, msg: 'Error loading lifafa' });
-    }
-});
-
-// ==================== ADMIN - DELETE USER ====================
-app.post('/api/admin/delete-user', adminMiddleware, async (req, res) => {
-    try {
-        const { userId, number, reason } = req.body;
-        
-        if (!userId || !number || !reason) {
-            return res.json({ success: false, msg: 'User ID, number and reason required' });
-        }
-        
-        const user = await User.findById(userId);
-        if (!user) {
-            return res.json({ success: false, msg: 'User not found' });
-        }
-        
-        if (user.balance > 0) {
-            return res.json({ success: false, msg: 'Cannot delete user with balance > 0. Refund first.' });
-        }
-        
-        const session = await mongoose.startSession();
-        session.startTransaction();
-        
-        try {
-            await Transaction.deleteMany({ userId: user._id }).session(session);
-            await Withdrawal.deleteMany({ userId: user._id }).session(session);
-            await Lifafa.deleteMany({ createdBy: user._id }).session(session);
-            
-            await Lifafa.updateMany(
-                { claimedBy: user._id },
-                { $pull: { claimedBy: user._id } }
-            ).session(session);
-            
-            await User.findByIdAndDelete(userId).session(session);
-            
-            await session.commitTransaction();
-            session.endSession();
-            
-            res.json({ success: true, msg: 'User deleted successfully' });
-        } catch(err) {
-            await session.abortTransaction();
-            session.endSession();
-            throw err;
-        }
-        
-    } catch(err) {
-        console.error('Delete user error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to delete user' });
-    }
-});
-
-// ==================== ADMIN - DELETE LIFAFA ====================
-app.post('/api/admin/delete-lifafa', adminMiddleware, async (req, res) => {
-    try {
-        const { lifafaId, reason } = req.body;
-        
-        if (!lifafaId || !reason) {
-            return res.json({ success: false, msg: 'Lifafa ID and reason required' });
-        }
-        
-        const lifafa = await Lifafa.findById(lifafaId).populate('createdBy');
-        
-        if (!lifafa) {
-            return res.json({ success: false, msg: 'Lifafa not found' });
-        }
-        
-        if (lifafa.isActive && lifafa.createdBy) {
-            const totalUsers = lifafa.totalUsers || lifafa.numbers?.length || 1;
-            const claimedUsers = lifafa.claimedCount || 0;
-            const remainingUsers = totalUsers - claimedUsers;
-            const remainingAmount = lifafa.amount * remainingUsers;
-            
-            if (remainingAmount > 0) {
-                lifafa.createdBy.balance += remainingAmount;
-                await lifafa.createdBy.save();
-                
-                await new Transaction({
-                    userId: lifafa.createdBy._id,
-                    type: 'credit',
-                    amount: remainingAmount,
-                    description: `Refund for deleted lifafa: ${lifafa.title}`
-                }).save();
-            }
-        }
-        
-        await Lifafa.findByIdAndDelete(lifafaId);
-        
-        res.json({ success: true, msg: 'Lifafa deleted successfully' });
-        
-    } catch(err) {
-        console.error('Delete lifafa error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to delete lifafa' });
-    }
-});
-
 // ==================== 404 HANDLER ====================
 app.use('*', (req, res) => {
-    res.status(404).json({ 
-        success: false, 
-        msg: 'Route not found',
-        path: req.originalUrl
-    });
+    res.status(404).json({ success: false, msg: 'Route not found' });
 });
 
-// ==================== ERROR HANDLING MIDDLEWARE ====================
+// ==================== ERROR HANDLER ====================
 app.use((err, req, res, next) => {
-    console.error('❌ Unhandled error:', err);
-    
-    if (err.name === 'ValidationError') {
-        return res.status(400).json({ 
-            success: false, 
-            msg: 'Validation error', 
-            errors: err.errors 
-        });
-    }
-    
-    if (err.name === 'CastError') {
-        return res.status(400).json({ 
-            success: false, 
-            msg: 'Invalid ID format' 
-        });
-    }
-    
-    if (err.code === 11000) {
-        return res.status(400).json({ 
-            success: false, 
-            msg: 'Duplicate key error' 
-        });
-    }
-    
-    res.status(500).json({ 
-        success: false, 
-        msg: 'Internal server error',
-        error: process.env.NODE_ENV === 'development' ? err.message : undefined
-    });
-});
-
-// Add these endpoints to your backend
-
-// ==================== CHANNEL VERIFICATION ROUTES ====================
-
-// Check if bot is admin in channel
-app.post('/api/channel/check-admin', async (req, res) => {
-    try {
-        const { channel } = req.body;
-        
-        if (!channel) {
-            return res.json({ success: false, msg: 'Channel required' });
-        }
-        
-        // In production, this would call Telegram API to check if bot is admin
-        // For demo, we'll simulate based on channel name
-        const botUsername = 'LIFAFAXAMITBOT';
-        
-        // Simulate admin check - in real app, call Telegram API
-        const isAdmin = !channel.includes('invalid'); // Demo logic
-        
-        res.json({
-            success: true,
-            channel,
-            isAdmin,
-            botUsername,
-            msg: isAdmin ? 'Bot is admin' : 'Bot is not admin in this channel'
-        });
-        
-    } catch(err) {
-        console.error('Check admin error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to check admin status' });
-    }
-});
-
-// Generate verification link
-app.post('/api/channel/generate-verification', async (req, res) => {
-    try {
-        const { channels, userId, lifafaCode } = req.body;
-        
-        if (!channels || !Array.isArray(channels) || !userId || !lifafaCode) {
-            return res.json({ success: false, msg: 'Missing required fields' });
-        }
-        
-        // Generate unique verification token
-        const verificationToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-        
-        // Store verification request (in production, save to database)
-        // For demo, we'll use a Map
-        verificationRequests.set(verificationToken, {
-            userId,
-            lifafaCode,
-            channels,
-            createdAt: Date.now(),
-            verifiedChannels: []
-        });
-        
-        const baseUrl = process.env.FRONTEND_URL || 'https://muskilxlifafa.vercel.app';
-        const verificationLink = `${baseUrl}/verify-channels?token=${verificationToken}`;
-        
-        res.json({
-            success: true,
-            verificationToken,
-            verificationLink,
-            botUsername: 'LIFAFAXAMITBOT'
-        });
-        
-    } catch(err) {
-        console.error('Generate verification error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to generate verification' });
-    }
-});
-
-// Verify channel membership (called by bot)
-app.post('/api/channel/verify-membership', async (req, res) => {
-    try {
-        const { userId, channel } = req.body;
-        
-        if (!userId || !channel) {
-            return res.json({ success: false, msg: 'Missing required fields' });
-        }
-        
-        // In production, this would be called by your bot after user joins
-        // For demo, we'll simulate verification
-        
-        // Find user's verification request
-        // Update verified channels list
-        
-        res.json({
-            success: true,
-            userId,
-            channel,
-            verified: true,
-            msg: 'Channel verified'
-        });
-        
-    } catch(err) {
-        console.error('Verify membership error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to verify' });
-    }
-});
-
-// Get verification status
-app.get('/api/channel/verification-status/:token', async (req, res) => {
-    try {
-        const { token } = req.params;
-        
-        // In production, fetch from database
-        // For demo, return simulated data
-        
-        res.json({
-            success: true,
-            token,
-            channels: [
-                { name: '@channel1', verified: true },
-                { name: '@channel2', verified: false },
-                { name: '@channel3', verified: true }
-            ],
-            allVerified: false
-        });
-        
-    } catch(err) {
-        console.error('Get verification status error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to get status' });
-    }
-});
-
-// Mark channel as verified (called when user joins)
-app.post('/api/channel/mark-verified', async (req, res) => {
-    try {
-        const { token, channel } = req.body;
-        
-        if (!token || !channel) {
-            return res.json({ success: false, msg: 'Missing required fields' });
-        }
-        
-        // In production, update database
-        // For demo, we'll just return success
-        
-        res.json({
-            success: true,
-            token,
-            channel,
-            verified: true,
-            msg: 'Channel marked as verified'
-        });
-        
-    } catch(err) {
-        console.error('Mark verified error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to mark verified' });
-    }
+    console.error('❌ Error:', err);
+    res.status(500).json({ success: false, msg: 'Internal server error' });
 });
 
 // ==================== START SERVER ====================
 const PORT = process.env.PORT || 5000;
 const server = app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`🔗 Test endpoint: http://localhost:${PORT}/api/test`);
-    console.log(`🛡️ Security middleware enabled`);
-    console.log(`✅ Channel verification system ready`);
     
     setTimeout(async () => {
         try {
@@ -2318,18 +1128,13 @@ const server = app.listen(PORT, () => {
                 console.log('👑 Default admin created');
             }
         } catch(err) {
-            console.log('❌ Error creating default admin:', err.message);
+            console.log('❌ Error creating admin:', err.message);
         }
     }, 2000);
 });
 
 process.on('unhandledRejection', (err) => {
-    console.error('❌ UNHANDLED REJECTION:', err);
-    server.close(() => process.exit(1));
-});
-
-process.on('uncaughtException', (err) => {
-    console.error('❌ UNCAUGHT EXCEPTION:', err);
+    console.error('❌ Unhandled rejection:', err);
     server.close(() => process.exit(1));
 });
 
