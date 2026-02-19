@@ -116,6 +116,8 @@ const UserSchema = new mongoose.Schema({
     lastLogin: Date,
     lastLoginIp: String,
     channels: [{ type: String }],
+    verificationToken: { type: String },
+    verificationExpiry: { type: Date },
     createdAt: { type: Date, default: Date.now }
 });
 
@@ -172,11 +174,12 @@ const AdminSchema = new mongoose.Schema({
 
 const VerificationSchema = new mongoose.Schema({
     token: { type: String, required: true, unique: true },
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-    lifafaCode: { type: String, required: true },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    chatId: { type: String },
+    lifafaCode: { type: String },
     channels: [{ type: String }],
     verifiedChannels: [{ type: String }],
-    createdAt: { type: Date, default: Date.now, expires: 3600 }
+    createdAt: { type: Date, default: Date.now, expires: 172800 } // 48 hours in seconds
 });
 
 const User = mongoose.model('User', UserSchema);
@@ -439,6 +442,254 @@ app.post('/api/auth/resend-otp', async (req, res) => {
     }
 });
 
+// ==================== VERIFICATION ROUTES ====================
+
+// Generate verification token
+app.post('/api/verification/generate', authMiddleware, async (req, res) => {
+    try {
+        const { channels, lifafaCode } = req.body;
+        const userId = req.userId;
+        
+        if (!channels || !Array.isArray(channels) || channels.length === 0) {
+            return res.json({ success: false, msg: 'Channels required' });
+        }
+        
+        // Check if user already has valid verification
+        const existingVerification = await Verification.findOne({
+            userId,
+            channels: { $all: channels },
+            createdAt: { $gt: new Date(Date.now() - 48 * 60 * 60 * 1000) }
+        });
+        
+        if (existingVerification) {
+            const allVerified = existingVerification.verifiedChannels.length === channels.length;
+            if (allVerified) {
+                return res.json({
+                    success: true,
+                    token: existingVerification.token,
+                    alreadyVerified: true,
+                    channels: channels.map(name => ({
+                        name,
+                        verified: existingVerification.verifiedChannels.includes(name)
+                    }))
+                });
+            }
+        }
+        
+        // Generate new token
+        const token = 'VERIFY_' + Math.random().toString(36).substring(2, 15) + 
+                     Math.random().toString(36).substring(2, 15);
+        
+        const verification = new Verification({
+            token,
+            userId,
+            lifafaCode,
+            channels,
+            verifiedChannels: []
+        });
+        
+        await verification.save();
+        
+        const baseUrl = process.env.FRONTEND_URL || 'https://muskilxlifafa.vercel.app';
+        const verificationLink = `${baseUrl}/verification.html?token=${token}`;
+        const botLink = `https://t.me/${process.env.BOT_USERNAME || 'LIFAFAXAMITBOT'}?start=verify_${token}`;
+        
+        res.json({
+            success: true,
+            token,
+            verificationLink,
+            botLink,
+            channels: channels.map(name => ({ name, verified: false }))
+        });
+        
+    } catch(err) {
+        console.error('Generate verification error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to generate verification' });
+    }
+});
+
+// Check verification token
+app.get('/api/verification/check/:token', async (req, res) => {
+    try {
+        const { token } = req.params;
+        
+        const verification = await Verification.findOne({ token });
+        if (!verification) {
+            return res.json({ success: false, msg: 'Invalid token' });
+        }
+        
+        // Check if expired (48 hours)
+        const now = Date.now();
+        const createdAt = verification.createdAt.getTime();
+        const expiryTime = createdAt + (48 * 60 * 60 * 1000); // 48 hours
+        
+        if (now > expiryTime) {
+            return res.json({ success: false, msg: 'Token expired' });
+        }
+        
+        // Get channels with verification status
+        const channels = verification.channels.map(name => ({
+            name,
+            verified: verification.verifiedChannels.includes(name)
+        }));
+        
+        const allVerified = channels.every(c => c.verified);
+        
+        res.json({
+            success: true,
+            channels,
+            allVerified,
+            expiresAt: new Date(expiryTime)
+        });
+        
+    } catch(err) {
+        res.status(500).json({ success: false, msg: 'Server error' });
+    }
+});
+
+// Get verification status
+app.get('/api/verification/status/:token', async (req, res) => {
+    try {
+        const { token } = req.params;
+        
+        const verification = await Verification.findOne({ token });
+        if (!verification) {
+            return res.json({ success: false, msg: 'Not found' });
+        }
+        
+        const channels = verification.channels.map(name => ({
+            name,
+            verified: verification.verifiedChannels.includes(name)
+        }));
+        
+        res.json({
+            success: true,
+            channels,
+            allVerified: channels.every(c => c.verified)
+        });
+        
+    } catch(err) {
+        res.status(500).json({ success: false, msg: 'Failed to get status' });
+    }
+});
+
+// Verify a single channel
+app.post('/api/verification/verify', async (req, res) => {
+    try {
+        const { token, channel, chatId } = req.body;
+        
+        const verification = await Verification.findOne({ token });
+        if (!verification) {
+            return res.json({ success: false, msg: 'Invalid token' });
+        }
+        
+        // Check if channel is in the list
+        if (!verification.channels.includes(channel)) {
+            return res.json({ success: false, msg: 'Invalid channel' });
+        }
+        
+        // Here you would call Telegram API to check if user is member
+        // For production, implement actual Telegram API call
+        // For now, we'll simulate with a check
+        
+        // In production, you'd verify via Telegram bot like:
+        // const isMember = await telegram.checkChannelMembership(chatId, channel);
+        
+        const isMember = true; // Simulate for demo
+        
+        if (!isMember) {
+            return res.json({ success: false, msg: 'Not a member. Please join first.' });
+        }
+        
+        if (!verification.verifiedChannels.includes(channel)) {
+            verification.verifiedChannels.push(channel);
+            
+            // Save chatId if provided
+            if (chatId) {
+                verification.chatId = chatId;
+            }
+            
+            await verification.save();
+            
+            // If user is logged in, update their channels
+            if (verification.userId) {
+                const user = await User.findById(verification.userId);
+                if (user) {
+                    // Add channel to user's list if not already there
+                    if (!user.channels.includes(channel)) {
+                        user.channels.push(channel);
+                        await user.save();
+                    }
+                }
+            }
+        }
+        
+        res.json({ 
+            success: true, 
+            verified: true,
+            channel,
+            allVerified: verification.verifiedChannels.length === verification.channels.length
+        });
+        
+    } catch(err) {
+        console.error('Verification error:', err);
+        res.status(500).json({ success: false, msg: 'Verification failed' });
+    }
+});
+
+// Save chatId for verification
+app.post('/api/verification/save-chatid', async (req, res) => {
+    try {
+        const { token, chatId } = req.body;
+        
+        const verification = await Verification.findOne({ token });
+        if (!verification) {
+            return res.json({ success: false, msg: 'Invalid token' });
+        }
+        
+        verification.chatId = chatId;
+        await verification.save();
+        
+        res.json({ success: true });
+        
+    } catch(err) {
+        res.status(500).json({ success: false, msg: 'Failed to save chat ID' });
+    }
+});
+
+// Check user verification for lifafa
+app.post('/api/verification/check-user', async (req, res) => {
+    try {
+        const { userId, lifafaCode } = req.body;
+        
+        const lifafa = await Lifafa.findOne({ code: lifafaCode });
+        if (!lifafa || !lifafa.channelRequired || !lifafa.channels?.length) {
+            return res.json({ success: true, verified: true }); // No channels required
+        }
+        
+        // Check if user has valid verification
+        const verification = await Verification.findOne({
+            userId,
+            channels: { $all: lifafa.channels },
+            createdAt: { $gt: new Date(Date.now() - 48 * 60 * 60 * 1000) }
+        });
+        
+        if (verification) {
+            const allVerified = verification.verifiedChannels.length === lifafa.channels.length;
+            return res.json({
+                success: true,
+                verified: allVerified,
+                verification
+            });
+        }
+        
+        res.json({ success: true, verified: false });
+        
+    } catch(err) {
+        res.status(500).json({ success: false, msg: 'Failed to check verification' });
+    }
+});
+
 // ==================== CHANNEL ROUTES ====================
 
 app.post('/api/channel/check-admin', async (req, res) => {
@@ -454,7 +705,7 @@ app.post('/api/channel/check-admin', async (req, res) => {
             success: true,
             channel,
             isAdmin,
-            botUsername: 'LIFAFAXAMITBOT'
+            botUsername: process.env.BOT_USERNAME || 'LIFAFAXAMITBOT'
         });
     } catch(err) {
         res.status(500).json({ success: false, msg: 'Failed to check admin' });
@@ -483,13 +734,15 @@ app.post('/api/channel/generate-verification', authMiddleware, async (req, res) 
         await verification.save();
         
         const baseUrl = process.env.FRONTEND_URL || 'https://muskilxlifafa.vercel.app';
-        const verificationLink = `${baseUrl}/verify-channels?token=${token}`;
+        const verificationLink = `${baseUrl}/verification.html?token=${token}`;
+        const botLink = `https://t.me/${process.env.BOT_USERNAME || 'LIFAFAXAMITBOT'}?start=verify_${token}`;
         
         res.json({
             success: true,
             token,
             verificationLink,
-            botUsername: 'LIFAFAXAMITBOT'
+            botLink,
+            botUsername: process.env.BOT_USERNAME || 'LIFAFAXAMITBOT'
         });
         
     } catch(err) {
@@ -538,13 +791,23 @@ app.post('/api/channel/mark-verified', async (req, res) => {
         if (!verification.verifiedChannels.includes(channel)) {
             verification.verifiedChannels.push(channel);
             await verification.save();
+            
+            // Update user's channels if userId exists
+            if (verification.userId) {
+                const user = await User.findById(verification.userId);
+                if (user && !user.channels.includes(channel)) {
+                    user.channels.push(channel);
+                    await user.save();
+                }
+            }
         }
         
         res.json({
             success: true,
             token,
             channel,
-            verified: true
+            verified: true,
+            allVerified: verification.verifiedChannels.length === verification.channels.length
         });
         
     } catch(err) {
@@ -620,6 +883,12 @@ app.get('/api/user/dashboard', authMiddleware, async (req, res) => {
             .sort('-createdAt')
             .limit(5);
         
+        // Check active verification
+        const activeVerification = await Verification.findOne({
+            userId: user._id,
+            createdAt: { $gt: new Date(Date.now() - 48 * 60 * 60 * 1000) }
+        }).sort('-createdAt');
+        
         res.json({ 
             success: true,
             balance: user.balance,
@@ -629,7 +898,13 @@ app.get('/api/user/dashboard', authMiddleware, async (req, res) => {
             channels: user.channels || [],
             unclaimedLifafas: unclaimedCount,
             recentTransactions,
-            createdLifafas
+            createdLifafas,
+            verification: activeVerification ? {
+                token: activeVerification.token,
+                channels: activeVerification.channels,
+                verifiedChannels: activeVerification.verifiedChannels,
+                allVerified: activeVerification.verifiedChannels.length === activeVerification.channels.length
+            } : null
         });
     } catch(err) {
         res.status(500).json({ success: false, msg: 'Error loading dashboard' });
@@ -643,6 +918,12 @@ app.get('/api/user/profile', authMiddleware, async (req, res) => {
         const totalLifafasCreated = await Lifafa.countDocuments({ createdBy: user._id });
         const totalLifafasClaimed = await Lifafa.countDocuments({ claimedBy: user._id });
         const totalTransactions = await Transaction.countDocuments({ userId: user._id });
+        
+        // Get all verifications
+        const verifications = await Verification.find({ 
+            userId: user._id,
+            createdAt: { $gt: new Date(Date.now() - 48 * 60 * 60 * 1000) }
+        }).sort('-createdAt');
         
         res.json({
             success: true,
@@ -658,7 +939,8 @@ app.get('/api/user/profile', authMiddleware, async (req, res) => {
                 stats: {
                     lifafasCreated: totalLifafasCreated,
                     lifafasClaimed: totalLifafasClaimed,
-                    transactions: totalTransactions
+                    transactions: totalTransactions,
+                    verifications: verifications.length
                 }
             }
         });
@@ -935,15 +1217,44 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
             return res.json({ success: false, msg: 'Already claimed' });
         }
         
+        // Check channel verification if required
         if (lifafa.channelRequired && lifafa.channels && lifafa.channels.length > 0) {
+            // First check if user has channels in their profile
             const userChannels = user.channels || [];
-            const missingChannels = lifafa.channels.filter(c => !userChannels.includes(c));
-            if (missingChannels.length > 0) {
-                return res.json({ 
-                    success: false, 
-                    msg: 'Channels not verified',
-                    missingChannels
+            const missingFromProfile = lifafa.channels.filter(c => !userChannels.includes(c));
+            
+            if (missingFromProfile.length > 0) {
+                // Check if there's an active verification
+                const verification = await Verification.findOne({
+                    userId: user._id,
+                    channels: { $all: lifafa.channels },
+                    createdAt: { $gt: new Date(Date.now() - 48 * 60 * 60 * 1000) }
                 });
+                
+                if (!verification) {
+                    return res.json({ 
+                        success: false, 
+                        msg: 'Channels not verified',
+                        missingChannels: lifafa.channels
+                    });
+                }
+                
+                const missingFromVerification = lifafa.channels.filter(c => !verification.verifiedChannels.includes(c));
+                if (missingFromVerification.length > 0) {
+                    return res.json({ 
+                        success: false, 
+                        msg: 'Channels not verified',
+                        missingChannels: missingFromVerification
+                    });
+                }
+                
+                // Update user's channels
+                lifafa.channels.forEach(c => {
+                    if (!user.channels.includes(c)) {
+                        user.channels.push(c);
+                    }
+                });
+                await user.save();
             }
         }
         
@@ -1052,15 +1363,44 @@ app.post('/api/lifafa/claim', async (req, res) => {
             return res.json({ success: false, msg: 'Already claimed' });
         }
         
+        // Check channel verification if required
         if (lifafa.channelRequired && lifafa.channels && lifafa.channels.length > 0) {
+            // First check if user has channels in their profile
             const userChannels = user.channels || [];
-            const missingChannels = lifafa.channels.filter(c => !userChannels.includes(c));
-            if (missingChannels.length > 0) {
-                return res.json({ 
-                    success: false, 
-                    msg: 'Channels not verified',
-                    missingChannels
+            const missingFromProfile = lifafa.channels.filter(c => !userChannels.includes(c));
+            
+            if (missingFromProfile.length > 0) {
+                // Check if there's an active verification
+                const verification = await Verification.findOne({
+                    userId: user._id,
+                    channels: { $all: lifafa.channels },
+                    createdAt: { $gt: new Date(Date.now() - 48 * 60 * 60 * 1000) }
                 });
+                
+                if (!verification) {
+                    return res.json({ 
+                        success: false, 
+                        msg: 'Channels not verified',
+                        missingChannels: lifafa.channels
+                    });
+                }
+                
+                const missingFromVerification = lifafa.channels.filter(c => !verification.verifiedChannels.includes(c));
+                if (missingFromVerification.length > 0) {
+                    return res.json({ 
+                        success: false, 
+                        msg: 'Channels not verified',
+                        missingChannels: missingFromVerification
+                    });
+                }
+                
+                // Update user's channels
+                lifafa.channels.forEach(c => {
+                    if (!user.channels.includes(c)) {
+                        user.channels.push(c);
+                    }
+                });
+                await user.save();
             }
         }
         
