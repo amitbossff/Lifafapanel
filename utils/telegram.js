@@ -3,6 +3,54 @@ const TelegramBot = require('node-telegram-bot-api');
 let bot = null;
 const API_URL = process.env.BACKEND_URL || 'https://lifafa-backend.onrender.com';
 
+// Helper function to escape Markdown special characters
+function escapeMarkdown(text) {
+    if (!text) return '';
+    return text
+        .replace(/_/g, '\\_')
+        .replace(/\*/g, '\\*')
+        .replace(/\[/g, '\\[')
+        .replace(/\]/g, '\\]')
+        .replace(/\(/g, '\\(')
+        .replace(/\)/g, '\\)')
+        .replace(/~/g, '\\~')
+        .replace(/`/g, '\\`')
+        .replace(/>/g, '\\>')
+        .replace(/#/g, '\\#')
+        .replace(/\+/g, '\\+')
+        .replace(/-/g, '\\-')
+        .replace(/=/g, '\\=')
+        .replace(/\|/g, '\\|')
+        .replace(/\{/g, '\\{')
+        .replace(/\}/g, '\\}')
+        .replace(/\./g, '\\.')
+        .replace(/!/g, '\\!');
+}
+
+// Safe send message function
+async function sendSafeMessage(chatId, text, options = {}) {
+    if (!bot) return false;
+    try {
+        // Always use Markdown
+        const sendOptions = { parse_mode: 'Markdown', ...options };
+        await bot.sendMessage(chatId, text, sendOptions);
+        return true;
+    } catch (err) {
+        // If Markdown fails, try without parse_mode
+        if (err.message.includes('parse') || err.message.includes('markdown')) {
+            try {
+                await bot.sendMessage(chatId, text, { ...options, parse_mode: undefined });
+                return true;
+            } catch (secondErr) {
+                console.error('Both send attempts failed:', secondErr.message);
+                return false;
+            }
+        }
+        console.error('Send message error:', err.message);
+        return false;
+    }
+}
+
 const initBot = (token) => {
     if (!token) return null;
     
@@ -32,11 +80,10 @@ const initBot = (token) => {
             const token = match[1];
             
             if (!token) {
-                return bot.sendMessage(chatId, 
+                return sendSafeMessage(chatId, 
                     '❌ Please provide verification token\n\n' +
                     'Usage: /verify YOUR_TOKEN\n\n' +
-                    'Example: /verify VERIFY_abc123', 
-                    { parse_mode: 'Markdown' }
+                    'Example: /verify VERIFY_abc123'
                 );
             }
             
@@ -46,10 +93,9 @@ const initBot = (token) => {
         // Handle /id command
         bot.onText(/\/id/, (msg) => {
             const chatId = msg.chat.id;
-            bot.sendMessage(chatId, 
-                `📱 *Your Telegram ID*\n\n\`${chatId}\`\n\n` +
-                `Use this ID for registration`,
-                { parse_mode: 'Markdown' }
+            sendSafeMessage(chatId, 
+                `📱 Your Telegram ID\n\n${chatId}\n\n` +
+                `Use this ID for registration`
             );
         });
         
@@ -67,8 +113,8 @@ const initBot = (token) => {
             
             if (data.startsWith('verify_channel_')) {
                 const parts = data.split('_');
-                const channel = parts[2];
-                const token = parts[3];
+                const channel = parts.slice(2, -1).join('_'); // Handle channels with underscores
+                const token = parts[parts.length - 1];
                 await handleChannelVerification(callbackQuery, chatId, msg, channel, token);
             }
             else if (data === 'refresh_verification') {
@@ -100,43 +146,43 @@ const initBot = (token) => {
 };
 
 // Send welcome message
-function sendWelcomeMessage(chatId) {
-    let replyMsg = `👋 *Welcome to Lifafa Bot!*\n\n`;
+async function sendWelcomeMessage(chatId) {
+    let replyMsg = `👋 Welcome to Lifafa Bot!\n\n`;
     replyMsg += `This bot helps you verify channels for Lifafa claims.\n\n`;
-    replyMsg += `🔹 *Commands*\n`;
+    replyMsg += `🔹 Commands\n`;
     replyMsg += `/id - Get your Telegram ID\n`;
     replyMsg += `/verify <token> - Start verification\n`;
     replyMsg += `/help - Show help\n\n`;
-    replyMsg += `🔹 *How to Verify*\n`;
+    replyMsg += `🔹 How to Verify\n`;
     replyMsg += `1. Get verification link from app\n`;
     replyMsg += `2. Click the link or use /verify command\n`;
     replyMsg += `3. Join required channels\n`;
     replyMsg += `4. Click verify buttons\n\n`;
     replyMsg += `✅ Once verified, valid for 48 hours!`;
     
-    bot.sendMessage(chatId, replyMsg, { parse_mode: 'Markdown' });
+    await sendSafeMessage(chatId, replyMsg);
 }
 
 // Send help message
-function sendHelpMessage(chatId) {
-    const helpMsg = `📖 *Bot Commands Help*\n\n` +
-        `*/start* - Start the bot\n` +
-        `*/id* - Get your Telegram ID\n` +
-        `*/verify <token>* - Verify channels using token\n` +
-        `*/status* - Check your verification status\n` +
-        `*/help* - Show this help\n\n` +
-        `🔹 *Verification Process*\n` +
+async function sendHelpMessage(chatId) {
+    const helpMsg = `📖 Bot Commands Help\n\n` +
+        `/start - Start the bot\n` +
+        `/id - Get your Telegram ID\n` +
+        `/verify <token> - Verify channels using token\n` +
+        `/status - Check your verification status\n` +
+        `/help - Show this help\n\n` +
+        `🔹 Verification Process\n` +
         `1. Get verification token from app\n` +
         `2. Send /verify YOUR_TOKEN\n` +
         `3. Join all channels listed\n` +
         `4. Click ✅ Verify buttons\n` +
         `5. All green = Verified! 🎉\n\n` +
-        `🔹 *Important*\n` +
+        `🔹 Important\n` +
         `• Verification lasts 48 hours\n` +
         `• Bot must be admin in channels\n` +
         `• After verification, claim in app`;
     
-    bot.sendMessage(chatId, helpMsg, { parse_mode: 'Markdown' });
+    await sendSafeMessage(chatId, helpMsg);
 }
 
 // Handle verification start
@@ -154,10 +200,9 @@ async function handleVerificationStart(chatId, token) {
         const data = await response.json();
         
         if (!data.success) {
-            return bot.sendMessage(chatId, 
-                '❌ *Invalid or expired verification token*\n\n' +
-                'Please get a new verification link from the app.',
-                { parse_mode: 'Markdown' }
+            return sendSafeMessage(chatId, 
+                '❌ Invalid or expired verification token\n\n' +
+                'Please get a new verification link from the app.'
             );
         }
         
@@ -165,12 +210,12 @@ async function handleVerificationStart(chatId, token) {
         const allVerified = data.allVerified;
         
         // Create verification message
-        let message = `🔐 *Channel Verification*\n\n`;
-        message += `*Token:* \`${token}\`\n`;
-        message += `*Status:* ${allVerified ? '✅ VERIFIED' : '⏳ PENDING'}\n\n`;
+        let message = `🔐 Channel Verification\n\n`;
+        message += `Token: ${token}\n`;
+        message += `Status: ${allVerified ? '✅ VERIFIED' : '⏳ PENDING'}\n\n`;
         
         if (allVerified) {
-            message += `✅ *All channels verified!*\n\n`;
+            message += `✅ All channels verified!\n\n`;
             message += `You can now claim lifafas in the app.\n`;
             message += `This verification is valid for 48 hours.\n\n`;
             
@@ -181,12 +226,11 @@ async function handleVerificationStart(chatId, token) {
             };
             
             return bot.sendMessage(chatId, message, {
-                parse_mode: 'Markdown',
                 reply_markup: keyboard
             });
         }
         
-        message += `📢 *Required Channels*\n\n`;
+        message += `📢 Required Channels\n\n`;
         
         // Build inline keyboard for channels
         const keyboard = {
@@ -207,7 +251,7 @@ async function handleVerificationStart(chatId, token) {
             }
         });
         
-        message += `\n📌 *Instructions:*\n`;
+        message += `\n📌 Instructions:\n`;
         message += `1. Click Join button for each channel\n`;
         message += `2. Join the channel in Telegram\n`;
         message += `3. Come back and click Verify\n`;
@@ -220,15 +264,13 @@ async function handleVerificationStart(chatId, token) {
         ]);
         
         await bot.sendMessage(chatId, message, {
-            parse_mode: 'Markdown',
             reply_markup: keyboard
         });
         
     } catch(err) {
         console.error('Verification error:', err);
-        bot.sendMessage(chatId, 
-            '❌ *Verification failed*\n\nPlease try again later.',
-            { parse_mode: 'Markdown' }
+        sendSafeMessage(chatId, 
+            '❌ Verification failed\n\nPlease try again later.'
         );
     }
 }
@@ -260,12 +302,12 @@ async function handleChannelVerification(callbackQuery, chatId, msg, channel, to
             const statusData = await statusRes.json();
             
             // Update message
-            let newMessage = `🔐 *Channel Verification*\n\n`;
-            newMessage += `*Token:* \`${token}\`\n`;
-            newMessage += `*Status:* ${statusData.allVerified ? '✅ VERIFIED' : '⏳ PENDING'}\n\n`;
+            let newMessage = `🔐 Channel Verification\n\n`;
+            newMessage += `Token: ${token}\n`;
+            newMessage += `Status: ${statusData.allVerified ? '✅ VERIFIED' : '⏳ PENDING'}\n\n`;
             
             if (statusData.allVerified) {
-                newMessage += `✅ *All channels verified!*\n\n`;
+                newMessage += `✅ All channels verified!\n\n`;
                 newMessage += `You can now claim lifafas in the app.\n`;
                 newMessage += `This verification is valid for 48 hours.\n\n`;
                 
@@ -278,20 +320,18 @@ async function handleChannelVerification(callbackQuery, chatId, msg, channel, to
                 await bot.editMessageText(newMessage, {
                     chat_id: chatId,
                     message_id: msg.message_id,
-                    parse_mode: 'Markdown',
                     reply_markup: keyboard
                 });
                 
                 // Send success notification
-                await bot.sendMessage(chatId, 
-                    `🎉 *Verification Complete!*\n\n` +
+                await sendSafeMessage(chatId, 
+                    `🎉 Verification Complete!\n\n` +
                     `✅ All channels verified!\n` +
-                    `You can now claim lifafas in the app.`,
-                    { parse_mode: 'Markdown' }
+                    `You can now claim lifafas in the app.`
                 );
                 
             } else {
-                newMessage += `📢 *Required Channels*\n\n`;
+                newMessage += `📢 Required Channels\n\n`;
                 
                 const keyboard = { inline_keyboard: [] };
                 
@@ -309,7 +349,7 @@ async function handleChannelVerification(callbackQuery, chatId, msg, channel, to
                     }
                 });
                 
-                newMessage += `\n📌 *Instructions:*\n`;
+                newMessage += `\n📌 Instructions:\n`;
                 newMessage += `1. Click Join button for each channel\n`;
                 newMessage += `2. Join the channel in Telegram\n`;
                 newMessage += `3. Come back and click Verify\n`;
@@ -322,16 +362,14 @@ async function handleChannelVerification(callbackQuery, chatId, msg, channel, to
                 await bot.editMessageText(newMessage, {
                     chat_id: chatId,
                     message_id: msg.message_id,
-                    parse_mode: 'Markdown',
                     reply_markup: keyboard
                 });
             }
             
             // Send verification success notification
-            await bot.sendMessage(chatId, 
-                `✅ *${channel} verified!*\n\n` +
-                `${statusData.allVerified ? '🎉 All channels verified!' : 'Keep verifying remaining channels.'}`,
-                { parse_mode: 'Markdown' }
+            await sendSafeMessage(chatId, 
+                `✅ ${channel} verified!\n\n` +
+                `${statusData.allVerified ? '🎉 All channels verified!' : 'Keep verifying remaining channels.'}`
             );
             
         } else {
@@ -361,15 +399,15 @@ async function refreshVerificationStatus(callbackQuery, chatId, msg, token) {
         const statusData = await statusRes.json();
         
         if (!statusData.success) {
-            return bot.sendMessage(chatId, '❌ Token expired', { parse_mode: 'Markdown' });
+            return sendSafeMessage(chatId, '❌ Token expired');
         }
         
-        let newMessage = `🔐 *Channel Verification*\n\n`;
-        newMessage += `*Token:* \`${token}\`\n`;
-        newMessage += `*Status:* ${statusData.allVerified ? '✅ VERIFIED' : '⏳ PENDING'}\n\n`;
+        let newMessage = `🔐 Channel Verification\n\n`;
+        newMessage += `Token: ${token}\n`;
+        newMessage += `Status: ${statusData.allVerified ? '✅ VERIFIED' : '⏳ PENDING'}\n\n`;
         
         if (statusData.allVerified) {
-            newMessage += `✅ *All channels verified!*\n\n`;
+            newMessage += `✅ All channels verified!\n\n`;
             newMessage += `You can now claim lifafas in the app.\n`;
             newMessage += `This verification is valid for 48 hours.\n\n`;
             
@@ -382,11 +420,10 @@ async function refreshVerificationStatus(callbackQuery, chatId, msg, token) {
             await bot.editMessageText(newMessage, {
                 chat_id: chatId,
                 message_id: msg.message_id,
-                parse_mode: 'Markdown',
                 reply_markup: keyboard
             });
         } else {
-            newMessage += `📢 *Required Channels*\n\n`;
+            newMessage += `📢 Required Channels\n\n`;
             
             const keyboard = { inline_keyboard: [] };
             
@@ -411,7 +448,6 @@ async function refreshVerificationStatus(callbackQuery, chatId, msg, token) {
             await bot.editMessageText(newMessage, {
                 chat_id: chatId,
                 message_id: msg.message_id,
-                parse_mode: 'Markdown',
                 reply_markup: keyboard
             });
         }
@@ -425,9 +461,8 @@ async function refreshVerificationStatus(callbackQuery, chatId, msg, token) {
 const sendOTP = async (chatId, otp) => {
     if (!bot) return false;
     try {
-        await bot.sendMessage(chatId, 
-            `🔐 *Lifafa OTP*\n\nYour OTP: *${otp}*\n\nValid for 5 minutes`,
-            { parse_mode: 'Markdown' }
+        await sendSafeMessage(chatId, 
+            `🔐 Lifafa OTP\n\nYour OTP: ${otp}\n\nValid for 5 minutes`
         );
         return true;
     } catch(err) {
@@ -439,9 +474,8 @@ const sendOTP = async (chatId, otp) => {
 const sendLoginAlert = async (chatId, user, ip) => {
     if (!bot) return;
     try {
-        await bot.sendMessage(chatId,
-            `🔐 *Login Alert*\n\n👤 *Username:* ${user.username}\n📱 *Number:* ${user.number}\n⏰ *Time:* ${new Date().toLocaleString()}\n🌐 *IP:* ${ip || 'Unknown'}`,
-            { parse_mode: 'Markdown' }
+        await sendSafeMessage(chatId,
+            `🔐 Login Alert\n\n👤 Username: ${user.username}\n📱 Number: ${user.number}\n⏰ Time: ${new Date().toLocaleString()}\n🌐 IP: ${ip || 'Unknown'}`
         );
     } catch(err) {}
 };
@@ -452,9 +486,8 @@ const sendTransactionAlert = async (chatId, type, amount, balance, description) 
     try {
         const emoji = type === 'credit' ? '💰' : '💸';
         const sign = type === 'credit' ? '+' : '-';
-        await bot.sendMessage(chatId,
-            `${emoji} *Transaction*\n\n*Type:* ${type.toUpperCase()}\n*Amount:* ${sign}₹${amount}\n*Balance:* ₹${balance}\n*Description:* ${description}`,
-            { parse_mode: 'Markdown' }
+        await sendSafeMessage(chatId,
+            `${emoji} Transaction\n\nType: ${type.toUpperCase()}\nAmount: ${sign}₹${amount}\nBalance: ₹${balance}\nDescription: ${description}`
         );
     } catch(err) {}
 };
@@ -464,9 +497,8 @@ const sendWithdrawalAlert = async (chatId, amount, status) => {
     if (!bot) return;
     try {
         const emoji = { 'pending': '⏳', 'approved': '✅', 'rejected': '❌', 'refunded': '↩️' };
-        await bot.sendMessage(chatId,
-            `💸 *Withdrawal ${status.toUpperCase()}*\n\n*Status:* ${emoji[status]} ${status}\n*Amount:* ₹${amount}`,
-            { parse_mode: 'Markdown' }
+        await sendSafeMessage(chatId,
+            `💸 Withdrawal ${status.toUpperCase()}\n\nStatus: ${emoji[status]} ${status}\nAmount: ₹${amount}`
         );
     } catch(err) {}
 };
@@ -477,9 +509,8 @@ const sendLifafaAlert = async (chatId, lifafa) => {
     try {
         const baseUrl = process.env.FRONTEND_URL || 'https://muskilxlifafa.vercel.app';
         const claimLink = `${baseUrl}/claimlifafa.html?code=${lifafa.code}`;
-        await bot.sendMessage(chatId,
-            `🎁 *New Lifafa Created!*\n\n📌 *Title:* ${lifafa.title}\n💰 *Amount:* ₹${lifafa.amount}\n🔗 *Link:* ${claimLink}`,
-            { parse_mode: 'Markdown' }
+        await sendSafeMessage(chatId,
+            `🎁 New Lifafa Created!\n\n📌 Title: ${lifafa.title}\n💰 Amount: ₹${lifafa.amount}\n🔗 Link: ${claimLink}`
         );
     } catch(err) {}
 };
@@ -488,9 +519,8 @@ const sendLifafaAlert = async (chatId, lifafa) => {
 const sendLifafaClaimAlert = async (chatId, lifafa, balance) => {
     if (!bot) return;
     try {
-        await bot.sendMessage(chatId,
-            `🧧 *Lifafa Claimed!*\n\n📌 *Title:* ${lifafa.title}\n💰 *Amount:* +₹${lifafa.amount}\n💳 *Balance:* ₹${balance}`,
-            { parse_mode: 'Markdown' }
+        await sendSafeMessage(chatId,
+            `🧧 Lifafa Claimed!\n\n📌 Title: ${lifafa.title}\n💰 Amount: +₹${lifafa.amount}\n💳 Balance: ₹${balance}`
         );
     } catch(err) {}
 };
