@@ -75,17 +75,22 @@ const initBot = (token) => {
     }
     
     try {
-        const isProduction = process.env.NODE_ENV === 'production';
-        bot = new TelegramBot(token, { polling: !isProduction });
+        // ✅ FIX: Always use polling mode for Render
+        // Webhook mode causes issues on free hosting
+        bot = new TelegramBot(token, { 
+            polling: true,
+            // Optional: Add polling options
+            polling: {
+                interval: 300, // Optional: polling interval in ms
+                autoStart: true,
+                params: {
+                    timeout: 10
+                }
+            }
+        });
         
-        if (!isProduction) {
-            console.log('🤖 Telegram Bot Connected with polling');
-            setupBotHandlers();
-        } else {
-            console.log('🤖 Telegram Bot initialized (webhook mode)');
-            const webhookUrl = `${process.env.BACKEND_URL}/webhook/telegram`;
-            bot.setWebHook(webhookUrl);
-        }
+        console.log('🤖 Telegram Bot Connected with polling mode');
+        setupBotHandlers();
         
         return bot;
     } catch(err) {
@@ -118,6 +123,26 @@ function setupBotHandlers() {
         const chatId = msg.chat.id;
         sendHelpMessage(chatId);
     });
+    
+    // Handle /verify command (for manual verification)
+    bot.onText(/\/verify/, (msg) => {
+        const chatId = msg.chat.id;
+        sendSafeMessage(chatId, 
+            `🔐 *Verification*\n\n` +
+            `To verify channels, please use the website.\n` +
+            `1. Go to the claim page\n` +
+            `2. Enter your number\n` +
+            `3. Follow the channel join instructions`,
+            { parse_mode: 'Markdown' }
+        );
+    });
+    
+    // Error handler
+    bot.on('polling_error', (error) => {
+        console.log('⚠️ Telegram polling error:', error.message);
+    });
+    
+    console.log('✅ Bot handlers registered');
 }
 
 // Send welcome message
