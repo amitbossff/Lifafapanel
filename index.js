@@ -444,44 +444,57 @@ app.post('/api/auth/resend-otp', async (req, res) => {
 
 // ==================== VERIFICATION ROUTES ====================
 
-// Generate verification token
-app.post('/api/verification/generate', authMiddleware, async (req, res) => {
+// Generate verification token (PUBLIC - no auth required)
+app.post('/api/verification/generate', async (req, res) => {
     try {
         const { channels, lifafaCode } = req.body;
-        const userId = req.userId;
+        let userId = null;
+        
+        // Check if user is logged in (optional)
+        const token = req.headers.authorization?.split(' ')[1];
+        if (token) {
+            try {
+                const decoded = jwt.verify(token, process.env.JWT_SECRET);
+                userId = decoded.userId;
+            } catch(err) {
+                // Ignore token errors for non-logged in users
+            }
+        }
         
         if (!channels || !Array.isArray(channels) || channels.length === 0) {
             return res.json({ success: false, msg: 'Channels required' });
         }
         
         // Check if user already has valid verification
-        const existingVerification = await Verification.findOne({
-            userId,
-            channels: { $all: channels },
-            createdAt: { $gt: new Date(Date.now() - 48 * 60 * 60 * 1000) }
-        });
-        
-        if (existingVerification) {
-            const allVerified = existingVerification.verifiedChannels.length === channels.length;
-            if (allVerified) {
-                return res.json({
-                    success: true,
-                    token: existingVerification.token,
-                    alreadyVerified: true,
-                    channels: channels.map(name => ({
-                        name,
-                        verified: existingVerification.verifiedChannels.includes(name)
-                    }))
-                });
+        if (userId) {
+            const existingVerification = await Verification.findOne({
+                userId,
+                channels: { $all: channels },
+                createdAt: { $gt: new Date(Date.now() - 48 * 60 * 60 * 1000) }
+            });
+            
+            if (existingVerification) {
+                const allVerified = existingVerification.verifiedChannels.length === channels.length;
+                if (allVerified) {
+                    return res.json({
+                        success: true,
+                        token: existingVerification.token,
+                        alreadyVerified: true,
+                        channels: channels.map(name => ({
+                            name,
+                            verified: existingVerification.verifiedChannels.includes(name)
+                        }))
+                    });
+                }
             }
         }
         
         // Generate new token
-        const token = 'VERIFY_' + Math.random().toString(36).substring(2, 15) + 
+        const verificationToken = 'VERIFY_' + Math.random().toString(36).substring(2, 15) + 
                      Math.random().toString(36).substring(2, 15);
         
         const verification = new Verification({
-            token,
+            token: verificationToken,
             userId,
             lifafaCode,
             channels,
@@ -490,15 +503,9 @@ app.post('/api/verification/generate', authMiddleware, async (req, res) => {
         
         await verification.save();
         
-        const baseUrl = process.env.FRONTEND_URL || 'https://muskilxlifafa.vercel.app';
-        const verificationLink = `${baseUrl}/verification.html?token=${token}`;
-        const botLink = `https://t.me/${process.env.BOT_USERNAME || 'LIFAFAXAMITBOT'}?start=verify_${token}`;
-        
         res.json({
             success: true,
-            token,
-            verificationLink,
-            botLink,
+            token: verificationToken,
             channels: channels.map(name => ({ name, verified: false }))
         });
         
@@ -588,39 +595,44 @@ app.post('/api/verification/verify', async (req, res) => {
             return res.json({ success: false, msg: 'Invalid channel' });
         }
         
-        // Here you would call Telegram API to check if user is member
-        // For production, implement actual Telegram API call
-        // For now, we'll simulate with a check
+        // Check if already verified
+        if (verification.verifiedChannels.includes(channel)) {
+            return res.json({ 
+                success: true, 
+                verified: true,
+                channel,
+                allVerified: verification.verifiedChannels.length === verification.channels.length
+            });
+        }
         
-        // In production, you'd verify via Telegram bot like:
+        // Here you would call Telegram API to check if user is member
+        // For production, implement actual Telegram API call:
         // const isMember = await telegram.checkChannelMembership(chatId, channel);
         
+        // For demo, we'll simulate successful verification
+        // In production, replace with actual Telegram API check
         const isMember = true; // Simulate for demo
         
         if (!isMember) {
             return res.json({ success: false, msg: 'Not a member. Please join first.' });
         }
         
-        if (!verification.verifiedChannels.includes(channel)) {
-            verification.verifiedChannels.push(channel);
-            
-            // Save chatId if provided
-            if (chatId) {
-                verification.chatId = chatId;
-            }
-            
-            await verification.save();
-            
-            // If user is logged in, update their channels
-            if (verification.userId) {
-                const user = await User.findById(verification.userId);
-                if (user) {
-                    // Add channel to user's list if not already there
-                    if (!user.channels.includes(channel)) {
-                        user.channels.push(channel);
-                        await user.save();
-                    }
-                }
+        // Mark as verified
+        verification.verifiedChannels.push(channel);
+        
+        // Save chatId if provided
+        if (chatId) {
+            verification.chatId = chatId;
+        }
+        
+        await verification.save();
+        
+        // If user is logged in, update their channels
+        if (verification.userId) {
+            const user = await User.findById(verification.userId);
+            if (user && !user.channels.includes(channel)) {
+                user.channels.push(channel);
+                await user.save();
             }
         }
         
@@ -1438,6 +1450,13 @@ app.post('/api/lifafa/claim', async (req, res) => {
         console.error('Claim error:', err);
         res.status(500).json({ success: false, msg: 'Claim failed' });
     }
+});
+
+// ==================== TELEGRAM WEBHOOK (Optional) ====================
+app.post('/webhook/telegram', (req, res) => {
+    // Handle Telegram webhook updates
+    // This is where you'd process updates if using webhook instead of polling
+    res.sendStatus(200);
 });
 
 // ==================== 404 HANDLER ====================
