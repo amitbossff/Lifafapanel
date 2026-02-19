@@ -48,7 +48,7 @@ app.use(cors({
         if (!origin) return callback(null, true);
         
         if (allowedOrigins.indexOf(origin) === -1) {
-            const msg = '❌ CORS policy violation: This origin is not allowed to access this API.';
+            const msg = `❌ CORS policy violation: This origin is not allowed to access this API.`;
             console.log(`Blocked origin: ${origin}`);
             return callback(new Error(msg), false);
         }
@@ -127,7 +127,7 @@ requiredEnvVars.forEach(envVar => {
 console.log('✅ Environment variables verified');
 
 // Initialize Telegram Bot
-const bot = telegram.initBot(process.env.TELEGRAM_BOT_TOKEN);
+telegram.initBot(process.env.TELEGRAM_BOT_TOKEN);
 
 // MongoDB Connection with secure options
 mongoose.connect(process.env.MONGODB_URI, {
@@ -196,6 +196,9 @@ const LifafaSchema = new mongoose.Schema({
     claimedCount: { type: Number, default: 0, min: 0 },
     totalAmount: { type: Number, default: 0, min: 0 },
     isActive: { type: Boolean, default: true, index: true },
+    // New fields for channel verification
+    channels: [{ type: String }],
+    channelRequired: { type: Boolean, default: false },
     createdAt: { type: Date, default: Date.now, index: true }
 });
 
@@ -306,6 +309,36 @@ setInterval(() => {
     }
 }, 5 * 60 * 1000); // Clean up every 5 minutes
 
+// ==================== HELPER FUNCTION TO CHECK CHANNEL MEMBERSHIP ====================
+async function verifyChannelMembership(telegramUid, channels) {
+    if (!telegramUid || !channels || channels.length === 0) {
+        return { success: false, msg: 'Invalid parameters' };
+    }
+    
+    const missingChannels = [];
+    const verifiedChannels = [];
+    
+    for (const channel of channels) {
+        try {
+            const isMember = await telegram.checkChannelMembership(telegramUid, channel);
+            if (isMember) {
+                verifiedChannels.push(channel);
+            } else {
+                missingChannels.push(channel);
+            }
+        } catch (err) {
+            console.error(`Error checking channel ${channel}:`, err.message);
+            missingChannels.push(channel);
+        }
+    }
+    
+    return {
+        success: missingChannels.length === 0,
+        verifiedChannels,
+        missingChannels
+    };
+}
+
 // ==================== API ROUTES ====================
 
 // Health check endpoint
@@ -407,7 +440,6 @@ app.post('/api/auth/send-otp', async (req, res) => {
     }
 });
 
-// ===== NO ATTEMPT LIMIT =====
 app.post('/api/auth/verify-otp', async (req, res) => {
     try {
         const { username, number, password, telegramUid, otp } = req.body;
@@ -526,7 +558,6 @@ app.post('/api/auth/send-login-otp', async (req, res) => {
     }
 });
 
-// ===== NO ATTEMPT LIMIT =====
 app.post('/api/auth/verify-login-otp', async (req, res) => {
     try {
         const { number, otp, ip } = req.body;
@@ -927,7 +958,7 @@ app.get('/api/user/withdrawals', authMiddleware, async (req, res) => {
 
 app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
     try {
-        const { title, amount, code, numbers, userCount, channel } = req.body;
+        const { title, amount, code, numbers, userCount, channels, channelRequired } = req.body;
         const user = req.user;
         
         if (!title || !amount || amount <= 0) {
@@ -1002,7 +1033,10 @@ app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
             isUserCreated: true,
             isActive: true,
             claimedCount: 0,
-            claimedNumbers: []
+            claimedNumbers: [],
+            // New channel fields
+            channels: channels || [],
+            channelRequired: channelRequired || false
         });
         
         await lifafa.save();
@@ -1028,6 +1062,11 @@ app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
         } else {
             message += `\n*Type:* Public Unlimited`;
         }
+        
+        if (channels && channels.length > 0) {
+            message += `\n*Channels:* ${channels.join(', ')}`;
+        }
+        
         message += `\n*Total Cost:* ₹${totalCost}\n*Code:* \`${lifafaCode}\`\n*Link:* ${shareableLink}`;
         
         await telegram.sendMessage(user.telegramUid, message, { parse_mode: 'Markdown' });
@@ -1040,7 +1079,9 @@ app.post('/api/user/create-lifafa', authMiddleware, async (req, res) => {
             totalUsers,
             totalCost,
             newBalance: user.balance,
-            type: lifafaType
+            type: lifafaType,
+            channels: channels || [],
+            channelRequired: channelRequired || false
         });
         
     } catch(err) {
@@ -1088,7 +1129,8 @@ app.post('/api/user/unclaimed-lifafas', authMiddleware, async (req, res) => {
                 title: l.title,
                 amount: l.amount,
                 code: l.code,
-                channel: l.channel,
+                channels: l.channels,
+                channelRequired: l.channelRequired,
                 isPublic: false,
                 totalUsers: l.totalUsers || 1,
                 claimedCount: l.claimedCount || 0
@@ -1101,6 +1143,7 @@ app.post('/api/user/unclaimed-lifafas', authMiddleware, async (req, res) => {
     }
 });
 
+// ==================== UPDATED CLAIM ROUTE WITH CHANNEL VERIFICATION ====================
 app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
     try {
         const { code } = req.body;
@@ -1126,6 +1169,20 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
         
         if (lifafa.claimedNumbers && lifafa.claimedNumbers.includes(user.number)) {
             return res.json({ success: false, msg: 'Already claimed' });
+        }
+        
+        // Check channel verification if required
+        if (lifafa.channelRequired && lifafa.channels && lifafa.channels.length > 0) {
+            // Verify channel membership via Telegram
+            const verification = await verifyChannelMembership(user.telegramUid, lifafa.channels);
+            
+            if (!verification.success) {
+                return res.json({ 
+                    success: false, 
+                    msg: 'Channels not verified',
+                    missingChannels: verification.missingChannels
+                });
+            }
         }
         
         const totalAllowed = lifafa.totalUsers || lifafa.numbers?.length || 999999;
@@ -1164,6 +1221,100 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
     }
 });
 
+// ==================== PUBLIC LIFAFA CLAIM ROUTE WITH CHANNEL VERIFICATION ====================
+app.post('/api/lifafa/claim', async (req, res) => {
+    try {
+        const { code, number } = req.body;
+        
+        if (!code || !number) {
+            return res.json({ success: false, msg: 'Code and number required' });
+        }
+        
+        if (!/^LIF[A-Z0-9]+$/.test(code)) {
+            return res.json({ success: false, msg: 'Invalid code format' });
+        }
+        
+        if (!/^\d{10}$/.test(number)) {
+            return res.json({ success: false, msg: 'Invalid number format' });
+        }
+        
+        const user = await User.findOne({ number });
+        if (!user) {
+            return res.json({ success: false, msg: 'User not found. Please register first.' });
+        }
+        
+        if (user.isBlocked) {
+            return res.json({ success: false, msg: 'Account blocked' });
+        }
+        
+        const lifafa = await Lifafa.findOne({ code, isActive: true });
+        if (!lifafa) {
+            return res.json({ success: false, msg: 'Invalid or expired code' });
+        }
+        
+        if (lifafa.numbers && lifafa.numbers.length > 0) {
+            if (!lifafa.numbers.includes(number)) {
+                return res.json({ 
+                    success: false, 
+                    msg: 'This private lifafa is not for you' 
+                });
+            }
+        }
+        
+        if (lifafa.claimedNumbers && lifafa.claimedNumbers.includes(number)) {
+            return res.json({ success: false, msg: 'Already claimed' });
+        }
+        
+        // Check channel verification if required
+        if (lifafa.channelRequired && lifafa.channels && lifafa.channels.length > 0) {
+            // Verify channel membership via Telegram
+            const verification = await verifyChannelMembership(user.telegramUid, lifafa.channels);
+            
+            if (!verification.success) {
+                return res.json({ 
+                    success: false, 
+                    msg: 'Channels not verified',
+                    missingChannels: verification.missingChannels
+                });
+            }
+        }
+        
+        const totalAllowed = lifafa.totalUsers || lifafa.numbers?.length || 999999;
+        if (lifafa.claimedCount >= totalAllowed) {
+            lifafa.isActive = false;
+            await lifafa.save();
+            return res.json({ success: false, msg: 'This lifafa is fully claimed' });
+        }
+        
+        user.balance += lifafa.amount;
+        await user.save();
+        
+        lifafa.claimedBy.push(user._id);
+        lifafa.claimedNumbers.push(number);
+        lifafa.claimedCount++;
+        lifafa.totalAmount += lifafa.amount;
+        
+        if (lifafa.claimedCount >= totalAllowed) {
+            lifafa.isActive = false;
+        }
+        
+        await lifafa.save();
+        
+        await new Transaction({
+            userId: user._id,
+            type: 'credit',
+            amount: lifafa.amount,
+            description: `Claimed Lifafa: ${lifafa.title}`
+        }).save();
+        
+        res.json({ success: true, amount: lifafa.amount, newBalance: user.balance });
+        
+    } catch(err) {
+        console.error('Claim error:', err);
+        res.status(500).json({ success: false, msg: 'Claim failed' });
+    }
+});
+
 app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
     try {
         const { number } = req.body;
@@ -1195,6 +1346,18 @@ app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
         const claimedLifafas = [];
         
         for (const lifafa of lifafas) {
+            // Check channel verification for each lifafa if required
+            if (lifafa.channelRequired && lifafa.channels && lifafa.channels.length > 0) {
+                const verification = await verifyChannelMembership(user.telegramUid, lifafa.channels);
+                if (!verification.success) {
+                    return res.json({ 
+                        success: false, 
+                        msg: `Channel verification failed for ${lifafa.title}`,
+                        missingChannels: verification.missingChannels
+                    });
+                }
+            }
+            
             totalAmount += lifafa.amount;
             claimedLifafas.push(lifafa.title);
             
@@ -1275,7 +1438,8 @@ app.get('/api/lifafa/:code', async (req, res) => {
                 title: lifafa.title,
                 amount: lifafa.amount,
                 code: lifafa.code,
-                channel: lifafa.channel,
+                channels: lifafa.channels || [],
+                channelRequired: lifafa.channelRequired || false,
                 numbers: lifafa.numbers,
                 totalUsers: lifafa.totalUsers || 1,
                 type: type,
@@ -1292,85 +1456,6 @@ app.get('/api/lifafa/:code', async (req, res) => {
     } catch(err) {
         console.error('Error in /api/lifafa/:code', err);
         res.status(500).json({ success: false, msg: 'Server error loading lifafa' });
-    }
-});
-
-app.post('/api/lifafa/claim', async (req, res) => {
-    try {
-        const { code, number } = req.body;
-        
-        if (!code || !number) {
-            return res.json({ success: false, msg: 'Code and number required' });
-        }
-        
-        if (!/^LIF[A-Z0-9]+$/.test(code)) {
-            return res.json({ success: false, msg: 'Invalid code format' });
-        }
-        
-        if (!/^\d{10}$/.test(number)) {
-            return res.json({ success: false, msg: 'Invalid number format' });
-        }
-        
-        const user = await User.findOne({ number });
-        if (!user) {
-            return res.json({ success: false, msg: 'User not found. Please register first.' });
-        }
-        
-        if (user.isBlocked) {
-            return res.json({ success: false, msg: 'Account blocked' });
-        }
-        
-        const lifafa = await Lifafa.findOne({ code, isActive: true });
-        if (!lifafa) {
-            return res.json({ success: false, msg: 'Invalid or expired code' });
-        }
-        
-        if (lifafa.numbers && lifafa.numbers.length > 0) {
-            if (!lifafa.numbers.includes(number)) {
-                return res.json({ 
-                    success: false, 
-                    msg: 'This private lifafa is not for you' 
-                });
-            }
-        }
-        
-        if (lifafa.claimedNumbers && lifafa.claimedNumbers.includes(number)) {
-            return res.json({ success: false, msg: 'Already claimed' });
-        }
-        
-        const totalAllowed = lifafa.totalUsers || lifafa.numbers?.length || 999999;
-        if (lifafa.claimedCount >= totalAllowed) {
-            lifafa.isActive = false;
-            await lifafa.save();
-            return res.json({ success: false, msg: 'This lifafa is fully claimed' });
-        }
-        
-        user.balance += lifafa.amount;
-        await user.save();
-        
-        lifafa.claimedBy.push(user._id);
-        lifafa.claimedNumbers.push(number);
-        lifafa.claimedCount++;
-        lifafa.totalAmount += lifafa.amount;
-        
-        if (lifafa.claimedCount >= totalAllowed) {
-            lifafa.isActive = false;
-        }
-        
-        await lifafa.save();
-        
-        await new Transaction({
-            userId: user._id,
-            type: 'credit',
-            amount: lifafa.amount,
-            description: `Claimed Lifafa: ${lifafa.title}`
-        }).save();
-        
-        res.json({ success: true, amount: lifafa.amount, newBalance: user.balance });
-        
-    } catch(err) {
-        console.error('Claim error:', err);
-        res.status(500).json({ success: false, msg: 'Claim failed' });
     }
 });
 
@@ -1477,470 +1562,6 @@ app.get('/api/admin/users', adminMiddleware, async (req, res) => {
     }
 });
 
-app.get('/api/admin/users/:id', adminMiddleware, async (req, res) => {
-    try {
-        const user = await User.findById(req.params.id).select('-password');
-        if (!user) {
-            return res.json({ success: false, msg: 'User not found' });
-        }
-        
-        const transactions = await Transaction.find({ userId: user._id })
-            .sort('-createdAt')
-            .limit(20);
-        
-        const withdrawals = await Withdrawal.find({ userId: user._id })
-            .sort('-createdAt');
-        
-        const createdLifafas = await Lifafa.find({ createdBy: user._id })
-            .sort('-createdAt');
-        
-        res.json({
-            success: true,
-            user,
-            transactions,
-            withdrawals,
-            createdLifafas
-        });
-    } catch(err) {
-        console.error('Get user error:', err);
-        res.status(500).json({ success: false, msg: 'Error loading user' });
-    }
-});
-
-app.post('/api/admin/user-balance', adminMiddleware, async (req, res) => {
-    try {
-        const { number, amount, action, reason } = req.body;
-        
-        if (!number || !amount || !action) {
-            return res.json({ success: false, msg: 'Number, amount and action required' });
-        }
-        
-        if (!/^\d{10}$/.test(number)) {
-            return res.json({ success: false, msg: 'Invalid number format' });
-        }
-        
-        if (amount <= 0 || amount > 1000000) {
-            return res.json({ success: false, msg: 'Amount must be between ₹1 and ₹10,00,000' });
-        }
-        
-        const user = await User.findOne({ number });
-        if (!user) {
-            return res.json({ success: false, msg: 'User not found' });
-        }
-        
-        let transactionType;
-        let description;
-        
-        if (action === 'add') {
-            user.balance += amount;
-            transactionType = 'credit';
-            description = reason || 'Admin credited';
-        } else if (action === 'deduct') {
-            if (user.balance < amount) {
-                return res.json({ success: false, msg: 'Insufficient balance' });
-            }
-            user.balance -= amount;
-            transactionType = 'debit';
-            description = reason || 'Admin debited';
-        } else {
-            return res.json({ success: false, msg: 'Invalid action' });
-        }
-        
-        await user.save();
-        
-        await new Transaction({
-            userId: user._id,
-            type: transactionType,
-            amount,
-            description
-        }).save();
-        
-        await telegram.sendTransactionAlert(
-            user.telegramUid, transactionType, amount, user.balance, description
-        );
-        
-        res.json({ 
-            success: true, 
-            msg: `Balance ${action}ed successfully`,
-            newBalance: user.balance
-        });
-        
-    } catch(err) {
-        console.error('Balance update error:', err);
-        res.status(500).json({ success: false, msg: 'Operation failed' });
-    }
-});
-
-app.post('/api/admin/block-user', adminMiddleware, async (req, res) => {
-    try {
-        const { number, block, reason } = req.body;
-        
-        if (!number) {
-            return res.json({ success: false, msg: 'Number required' });
-        }
-        
-        if (!/^\d{10}$/.test(number)) {
-            return res.json({ success: false, msg: 'Invalid number format' });
-        }
-        
-        const user = await User.findOne({ number });
-        if (!user) {
-            return res.json({ success: false, msg: 'User not found' });
-        }
-        
-        user.isBlocked = block;
-        await user.save();
-        
-        await telegram.sendMessage(user.telegramUid,
-            `🚫 *Account ${block ? 'Blocked' : 'Unblocked'}*\n\n${reason ? `Reason: ${reason}` : ''}`,
-            { parse_mode: 'Markdown' }
-        );
-        
-        res.json({ success: true, msg: `User ${block ? 'blocked' : 'unblocked'}` });
-    } catch(err) {
-        console.error('Block user error:', err);
-        res.status(500).json({ success: false, msg: 'Operation failed' });
-    }
-});
-
-app.post('/api/admin/create-lifafa', adminMiddleware, async (req, res) => {
-    try {
-        const { title, amount, numbers } = req.body;
-        
-        if (!title || !amount) {
-            return res.json({ success: false, msg: 'Title and amount required' });
-        }
-        
-        if (title.length < 3 || title.length > 50) {
-            return res.json({ success: false, msg: 'Title must be 3-50 characters' });
-        }
-        
-        if (amount <= 0 || amount > 100000) {
-            return res.json({ success: false, msg: 'Amount must be between ₹1 and ₹1,00,000' });
-        }
-        
-        const code = 'LIF' + Math.random().toString(36).substring(2, 10).toUpperCase();
-        
-        const allowedNumbers = numbers ? numbers.split(/[\n,]+/).map(n => n.trim()).filter(n => /^\d{10}$/.test(n)) : [];
-        
-        if (allowedNumbers.length > 1000) {
-            return res.json({ success: false, msg: 'Maximum 1000 numbers allowed' });
-        }
-        
-        const lifafa = new Lifafa({
-            title,
-            amount,
-            code,
-            numbers: allowedNumbers,
-            createdBy: req.adminId,
-            isUserCreated: false
-        });
-        
-        await lifafa.save();
-        
-        res.json({ success: true, msg: 'Lifafa created', code });
-        
-    } catch(err) {
-        console.error('Create lifafa error:', err);
-        res.status(500).json({ success: false, msg: 'Creation failed' });
-    }
-});
-
-app.get('/api/admin/withdrawals', adminMiddleware, async (req, res) => {
-    try {
-        const status = req.query.status;
-        let query = {};
-        if (status && ['pending', 'approved', 'rejected', 'refunded'].includes(status)) {
-            query.status = status;
-        }
-        
-        const withdrawals = await Withdrawal.find(query)
-            .populate('userId', 'number username')
-            .sort('-createdAt')
-            .limit(100);
-        
-        res.json({ success: true, withdrawals });
-    } catch(err) {
-        console.error('Get withdrawals error:', err);
-        res.status(500).json({ success: false, msg: 'Error loading withdrawals' });
-    }
-});
-
-app.post('/api/admin/update-withdrawal', adminMiddleware, async (req, res) => {
-    try {
-        const { withdrawalId, status, remarks } = req.body;
-        
-        if (!withdrawalId || !status) {
-            return res.json({ success: false, msg: 'Withdrawal ID and status required' });
-        }
-        
-        if (!['approved', 'rejected', 'refunded'].includes(status)) {
-            return res.json({ success: false, msg: 'Invalid status' });
-        }
-        
-        const withdrawal = await Withdrawal.findById(withdrawalId).populate('userId');
-        if (!withdrawal) {
-            return res.json({ success: false, msg: 'Withdrawal not found' });
-        }
-        
-        const oldStatus = withdrawal.status;
-        withdrawal.status = status;
-        withdrawal.processedBy = req.adminId;
-        withdrawal.processedAt = new Date();
-        if (remarks) withdrawal.remarks = remarks;
-        
-        await withdrawal.save();
-        
-        if (status === 'refunded' && oldStatus === 'pending') {
-            withdrawal.userId.balance += withdrawal.amount;
-            await withdrawal.userId.save();
-            
-            await new Transaction({
-                userId: withdrawal.userId._id,
-                type: 'credit',
-                amount: withdrawal.amount,
-                description: 'Withdrawal refunded'
-            }).save();
-        }
-        
-        await telegram.sendWithdrawalAlert(withdrawal.userId.telegramUid, withdrawal.amount, status);
-        
-        res.json({ success: true, msg: `Withdrawal ${status}` });
-    } catch(err) {
-        console.error('Update withdrawal error:', err);
-        res.status(500).json({ success: false, msg: 'Update failed' });
-    }
-});
-
-app.get('/api/admin/logs', adminMiddleware, async (req, res) => {
-    try {
-        const logs = await Transaction.find()
-            .populate('userId', 'number')
-            .sort('-createdAt')
-            .limit(100);
-            
-        res.json({ 
-            success: true,
-            logs: logs.map(l => ({
-                id: l._id,
-                type: l.type,
-                user: l.userId?.number || 'Unknown',
-                amount: l.amount,
-                description: l.description,
-                time: l.createdAt
-            }))
-        });
-    } catch(err) {
-        console.error('Get logs error:', err);
-        res.status(500).json({ success: false, msg: 'Error loading logs' });
-    }
-});
-
-// ==================== ADMIN - LIFAFA OVER & REFUND ====================
-
-app.get('/api/admin/all-lifafas', adminMiddleware, async (req, res) => {
-    try {
-        const lifafas = await Lifafa.find()
-            .populate('createdBy', 'username number')
-            .sort('-createdAt')
-            .limit(100);
-        
-        res.json({ success: true, lifafas });
-    } catch(err) {
-        console.error('Get all lifafas error:', err);
-        res.status(500).json({ success: false, msg: 'Error loading lifafas' });
-    }
-});
-
-app.post('/api/admin/lifafa-over', adminMiddleware, async (req, res) => {
-    try {
-        const { lifafaId, reason } = req.body;
-        
-        if (!lifafaId) {
-            return res.json({ success: false, msg: 'Lifafa ID required' });
-        }
-        
-        const lifafa = await Lifafa.findById(lifafaId).populate('createdBy');
-        
-        if (!lifafa) {
-            return res.json({ success: false, msg: 'Lifafa not found' });
-        }
-        
-        if (!lifafa.isActive) {
-            return res.json({ success: false, msg: 'Lifafa is already over' });
-        }
-        
-        const totalUsers = lifafa.totalUsers || lifafa.numbers?.length || 1;
-        const claimedUsers = lifafa.claimedCount || 0;
-        const remainingUsers = totalUsers - claimedUsers;
-        const remainingAmount = lifafa.amount * remainingUsers;
-        
-        if (lifafa.createdBy && remainingAmount > 0) {
-            lifafa.createdBy.balance += remainingAmount;
-            await lifafa.createdBy.save();
-            
-            await new Transaction({
-                userId: lifafa.createdBy._id,
-                type: 'credit',
-                amount: remainingAmount,
-                description: `Refund for lifafa: ${lifafa.title} (${remainingUsers} unclaimed)`
-            }).save();
-            
-            await telegram.sendMessage(lifafa.createdBy.telegramUid,
-                `💰 *Lifafa Refund*\n\n` +
-                `Your lifafa "${lifafa.title}" has been marked as over.\n` +
-                `Remaining amount: ₹${remainingAmount} (${remainingUsers} unclaimed users)\n` +
-                `has been refunded to your balance.`,
-                { parse_mode: 'Markdown' }
-            );
-        }
-        
-        lifafa.isActive = false;
-        await lifafa.save();
-        
-        res.json({ 
-            success: true, 
-            msg: 'Lifafa marked as over',
-            remainingUsers,
-            remainingAmount,
-            refunded: remainingAmount > 0
-        });
-        
-    } catch(err) {
-        console.error('Lifafa over error:', err);
-        res.status(500).json({ success: false, msg: 'Operation failed' });
-    }
-});
-
-app.get('/api/admin/lifafa/:id', adminMiddleware, async (req, res) => {
-    try {
-        const lifafa = await Lifafa.findById(req.params.id)
-            .populate('createdBy', 'username number telegramUid balance')
-            .populate('claimedBy', 'username number');
-        
-        if (!lifafa) {
-            return res.json({ success: false, msg: 'Lifafa not found' });
-        }
-        
-        const totalUsers = lifafa.totalUsers || lifafa.numbers?.length || 1;
-        const claimedUsers = lifafa.claimedCount || 0;
-        const remainingUsers = totalUsers - claimedUsers;
-        const remainingAmount = lifafa.amount * remainingUsers;
-        
-        res.json({
-            success: true,
-            lifafa: {
-                ...lifafa.toObject(),
-                stats: {
-                    totalUsers,
-                    claimedUsers,
-                    remainingUsers,
-                    totalAmount: lifafa.amount * totalUsers,
-                    claimedAmount: lifafa.amount * claimedUsers,
-                    remainingAmount
-                }
-            }
-        });
-    } catch(err) {
-        console.error('Get lifafa error:', err);
-        res.status(500).json({ success: false, msg: 'Error loading lifafa' });
-    }
-});
-
-// ==================== ADMIN - DELETE USER ====================
-app.post('/api/admin/delete-user', adminMiddleware, async (req, res) => {
-    try {
-        const { userId, number, reason } = req.body;
-        
-        if (!userId || !number || !reason) {
-            return res.json({ success: false, msg: 'User ID, number and reason required' });
-        }
-        
-        const user = await User.findById(userId);
-        if (!user) {
-            return res.json({ success: false, msg: 'User not found' });
-        }
-        
-        if (user.balance > 0) {
-            return res.json({ success: false, msg: 'Cannot delete user with balance > 0. Refund first.' });
-        }
-        
-        // Start a session for transaction
-        const session = await mongoose.startSession();
-        session.startTransaction();
-        
-        try {
-            await Transaction.deleteMany({ userId: user._id }).session(session);
-            await Withdrawal.deleteMany({ userId: user._id }).session(session);
-            await Lifafa.deleteMany({ createdBy: user._id }).session(session);
-            
-            await Lifafa.updateMany(
-                { claimedBy: user._id },
-                { $pull: { claimedBy: user._id } }
-            ).session(session);
-            
-            await User.findByIdAndDelete(userId).session(session);
-            
-            await session.commitTransaction();
-            session.endSession();
-            
-            res.json({ success: true, msg: 'User deleted successfully' });
-        } catch(err) {
-            await session.abortTransaction();
-            session.endSession();
-            throw err;
-        }
-        
-    } catch(err) {
-        console.error('Delete user error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to delete user' });
-    }
-});
-
-// ==================== ADMIN - DELETE LIFAFA ====================
-app.post('/api/admin/delete-lifafa', adminMiddleware, async (req, res) => {
-    try {
-        const { lifafaId, reason } = req.body;
-        
-        if (!lifafaId || !reason) {
-            return res.json({ success: false, msg: 'Lifafa ID and reason required' });
-        }
-        
-        const lifafa = await Lifafa.findById(lifafaId).populate('createdBy');
-        
-        if (!lifafa) {
-            return res.json({ success: false, msg: 'Lifafa not found' });
-        }
-        
-        if (lifafa.isActive && lifafa.createdBy) {
-            const totalUsers = lifafa.totalUsers || lifafa.numbers?.length || 1;
-            const claimedUsers = lifafa.claimedCount || 0;
-            const remainingUsers = totalUsers - claimedUsers;
-            const remainingAmount = lifafa.amount * remainingUsers;
-            
-            if (remainingAmount > 0) {
-                lifafa.createdBy.balance += remainingAmount;
-                await lifafa.createdBy.save();
-                
-                await new Transaction({
-                    userId: lifafa.createdBy._id,
-                    type: 'credit',
-                    amount: remainingAmount,
-                    description: `Refund for deleted lifafa: ${lifafa.title}`
-                }).save();
-            }
-        }
-        
-        await Lifafa.findByIdAndDelete(lifafaId);
-        
-        res.json({ success: true, msg: 'Lifafa deleted successfully' });
-        
-    } catch(err) {
-        console.error('Delete lifafa error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to delete lifafa' });
-    }
-});
-
 // ==================== 404 HANDLER ====================
 app.use('*', (req, res) => {
     res.status(404).json({ 
@@ -1992,6 +1613,7 @@ const server = app.listen(PORT, () => {
     console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`🔗 Test endpoint: http://localhost:${PORT}/api/test`);
     console.log(`🛡️ Security middleware enabled`);
+    console.log(`✅ Channel verification system active`);
     console.log(`✅ OTP rate limiting completely removed - no limits on auth routes`);
     
     // Create default admin if not exists
