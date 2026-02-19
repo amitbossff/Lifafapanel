@@ -3,7 +3,7 @@ const TelegramBot = require('node-telegram-bot-api');
 let bot = null;
 const API_URL = process.env.BACKEND_URL || 'https://lifafa-backend.onrender.com';
 
-// Helper function to escape Markdown special characters
+// Helper function to escape Markdown
 function escapeMarkdown(text) {
     if (!text) return '';
     return text
@@ -31,15 +31,15 @@ function escapeMarkdown(text) {
 async function sendSafeMessage(chatId, text, options = {}) {
     if (!bot) return false;
     try {
-        // Always use Markdown
+        // Try with Markdown first
         const sendOptions = { parse_mode: 'Markdown', ...options };
         await bot.sendMessage(chatId, text, sendOptions);
         return true;
     } catch (err) {
-        // If Markdown fails, try without parse_mode
+        // If Markdown fails, try without formatting
         if (err.message.includes('parse') || err.message.includes('markdown')) {
             try {
-                await bot.sendMessage(chatId, text, { ...options, parse_mode: undefined });
+                await bot.sendMessage(chatId, text.replace(/[*_`[\]()]/g, ''), { ...options, parse_mode: undefined });
                 return true;
             } catch (secondErr) {
                 console.error('Both send attempts failed:', secondErr.message);
@@ -52,91 +52,25 @@ async function sendSafeMessage(chatId, text, options = {}) {
 }
 
 const initBot = (token) => {
-    if (!token) return null;
+    if (!token) {
+        console.log('⚠️ No Telegram bot token provided');
+        return null;
+    }
     
     try {
-        bot = new TelegramBot(token, { polling: true });
-        console.log('🤖 Telegram Bot Connected');
+        // Disable polling in production to avoid conflicts
+        const isProduction = process.env.NODE_ENV === 'production';
+        bot = new TelegramBot(token, { polling: !isProduction });
         
-        // Handle /start command
-        bot.onText(/\/start/, (msg) => {
-            const chatId = msg.chat.id;
-            const text = msg.text || '';
-            
-            // Check if token is provided in start command
-            const tokenMatch = text.match(/\/start\s+verify_([A-Za-z0-9_]+)/);
-            
-            if (tokenMatch) {
-                const verificationToken = tokenMatch[1];
-                handleVerificationStart(chatId, verificationToken);
-            } else {
-                sendWelcomeMessage(chatId);
-            }
-        });
-        
-        // Handle /verify command
-        bot.onText(/\/verify(?:\s+)?([A-Za-z0-9_]+)?/, async (msg, match) => {
-            const chatId = msg.chat.id;
-            const token = match[1];
-            
-            if (!token) {
-                return sendSafeMessage(chatId, 
-                    '❌ Please provide verification token\n\n' +
-                    'Usage: /verify YOUR_TOKEN\n\n' +
-                    'Example: /verify VERIFY_abc123'
-                );
-            }
-            
-            await handleVerificationStart(chatId, token);
-        });
-        
-        // Handle /id command
-        bot.onText(/\/id/, (msg) => {
-            const chatId = msg.chat.id;
-            sendSafeMessage(chatId, 
-                `📱 Your Telegram ID\n\n${chatId}\n\n` +
-                `Use this ID for registration`
-            );
-        });
-        
-        // Handle /help command
-        bot.onText(/\/help/, (msg) => {
-            const chatId = msg.chat.id;
-            sendHelpMessage(chatId);
-        });
-        
-        // Handle callback queries
-        bot.on('callback_query', async (callbackQuery) => {
-            const msg = callbackQuery.message;
-            const chatId = msg.chat.id;
-            const data = callbackQuery.data;
-            
-            if (data.startsWith('verify_channel_')) {
-                const parts = data.split('_');
-                const channel = parts.slice(2, -1).join('_'); // Handle channels with underscores
-                const token = parts[parts.length - 1];
-                await handleChannelVerification(callbackQuery, chatId, msg, channel, token);
-            }
-            else if (data === 'refresh_verification') {
-                const token = msg.text.match(/Token: `([^`]+)`/)?.[1];
-                if (token) {
-                    await refreshVerificationStatus(callbackQuery, chatId, msg, token);
-                }
-            }
-            else if (data === 'open_app') {
-                await bot.answerCallbackQuery(callbackQuery.id, {
-                    text: 'Opening app...',
-                    url: process.env.FRONTEND_URL || 'https://muskilxlifafa.vercel.app'
-                });
-            }
-            else if (data.startsWith('open_channel_')) {
-                const channel = data.replace('open_channel_', '');
-                await bot.answerCallbackQuery(callbackQuery.id, {
-                    text: `Opening ${channel}...`,
-                    url: `https://t.me/${channel.replace('@', '')}`
-                });
-            }
-        });
+        if (!isProduction) {
+            console.log('🤖 Telegram Bot Connected with polling');
+            setupBotHandlers();
+        } else {
+            console.log('🤖 Telegram Bot initialized (webhook mode)');
+            // Setup webhook if needed
+            const webhookUrl = `${process.env.BACKEND_URL}/webhook/telegram`;
+            bot.setWebHook(webhookUrl);
+        }
         
         return bot;
     } catch(err) {
@@ -145,22 +79,107 @@ const initBot = (token) => {
     }
 };
 
+// Setup bot handlers
+function setupBotHandlers() {
+    if (!bot) return;
+    
+    // Handle /start command
+    bot.onText(/\/start/, (msg) => {
+        const chatId = msg.chat.id;
+        const text = msg.text || '';
+        
+        // Check if token is provided in start command
+        const tokenMatch = text.match(/\/start\s+verify_([A-Za-z0-9_]+)/);
+        
+        if (tokenMatch) {
+            const verificationToken = tokenMatch[1];
+            handleVerificationStart(chatId, verificationToken);
+        } else {
+            sendWelcomeMessage(chatId);
+        }
+    });
+    
+    // Handle /verify command
+    bot.onText(/\/verify(?:\s+)?([A-Za-z0-9_]+)?/, async (msg, match) => {
+        const chatId = msg.chat.id;
+        const token = match[1];
+        
+        if (!token) {
+            return sendSafeMessage(chatId, 
+                '❌ Please provide verification token\n\n' +
+                'Usage: /verify YOUR_TOKEN\n\n' +
+                'Example: /verify VERIFY_abc123'
+            );
+        }
+        
+        await handleVerificationStart(chatId, token);
+    });
+    
+    // Handle /id command
+    bot.onText(/\/id/, (msg) => {
+        const chatId = msg.chat.id;
+        sendSafeMessage(chatId, 
+            `📱 Your Telegram ID\n\n${chatId}\n\n` +
+            `Use this ID for registration`
+        );
+    });
+    
+    // Handle /help command
+    bot.onText(/\/help/, (msg) => {
+        const chatId = msg.chat.id;
+        sendHelpMessage(chatId);
+    });
+    
+    // Handle callback queries (for inline keyboards)
+    bot.on('callback_query', async (callbackQuery) => {
+        const msg = callbackQuery.message;
+        const chatId = msg.chat.id;
+        const data = callbackQuery.data;
+        
+        if (data.startsWith('verify_channel_')) {
+            const parts = data.split('_');
+            const channel = parts.slice(2, -1).join('_');
+            const token = parts[parts.length - 1];
+            await handleChannelVerification(callbackQuery, chatId, msg, channel, token);
+        }
+        else if (data === 'refresh_verification') {
+            const token = msg.text.match(/Token: `([^`]+)`/)?.[1];
+            if (token) {
+                await refreshVerificationStatus(callbackQuery, chatId, msg, token);
+            }
+        }
+        else if (data === 'open_app') {
+            await bot.answerCallbackQuery(callbackQuery.id, {
+                text: 'Opening app...',
+                url: process.env.FRONTEND_URL || 'https://muskilxlifafa.vercel.app'
+            });
+        }
+        else if (data.startsWith('open_channel_')) {
+            const channel = data.replace('open_channel_', '');
+            await bot.answerCallbackQuery(callbackQuery.id, {
+                text: `Opening ${channel}...`,
+                url: `https://t.me/${channel.replace('@', '')}`
+            });
+        }
+    });
+}
+
 // Send welcome message
 async function sendWelcomeMessage(chatId) {
-    let replyMsg = `👋 Welcome to Lifafa Bot!\n\n`;
-    replyMsg += `This bot helps you verify channels for Lifafa claims.\n\n`;
-    replyMsg += `🔹 Commands\n`;
-    replyMsg += `/id - Get your Telegram ID\n`;
-    replyMsg += `/verify <token> - Start verification\n`;
-    replyMsg += `/help - Show help\n\n`;
-    replyMsg += `🔹 How to Verify\n`;
-    replyMsg += `1. Get verification link from app\n`;
-    replyMsg += `2. Click the link or use /verify command\n`;
-    replyMsg += `3. Join required channels\n`;
-    replyMsg += `4. Click verify buttons\n\n`;
-    replyMsg += `✅ Once verified, valid for 48 hours!`;
+    const welcomeMsg = `👋 Welcome to Lifafa Bot!\n\n` +
+        `This bot helps you verify channels for Lifafa claims.\n\n` +
+        `🔹 Commands\n` +
+        `/id - Get your Telegram ID\n` +
+        `/verify <token> - Start verification\n` +
+        `/help - Show help\n\n` +
+        `🔹 How to Verify\n` +
+        `1. Get verification link from app\n` +
+        `2. Click the link or use /verify command\n` +
+        `3. Join required channels\n` +
+        `4. Click verify buttons\n\n` +
+        `✅ Once verified, valid for 48 hours!`;
     
-    await sendSafeMessage(chatId, replyMsg);
+    await sendSafeMessage(chatId, welcomeMsg);
 }
 
 // Send help message
@@ -169,7 +188,6 @@ async function sendHelpMessage(chatId) {
         `/start - Start the bot\n` +
         `/id - Get your Telegram ID\n` +
         `/verify <token> - Verify channels using token\n` +
-        `/status - Check your verification status\n` +
         `/help - Show this help\n\n` +
         `🔹 Verification Process\n` +
         `1. Get verification token from app\n` +
@@ -269,9 +287,7 @@ async function handleVerificationStart(chatId, token) {
         
     } catch(err) {
         console.error('Verification error:', err);
-        sendSafeMessage(chatId, 
-            '❌ Verification failed\n\nPlease try again later.'
-        );
+        sendSafeMessage(chatId, '❌ Verification failed\n\nPlease try again later.');
     }
 }
 
