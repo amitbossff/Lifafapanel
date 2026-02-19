@@ -31,12 +31,10 @@ function escapeMarkdown(text) {
 async function sendSafeMessage(chatId, text, options = {}) {
     if (!bot) return false;
     try {
-        // Try with Markdown first
         const sendOptions = { parse_mode: 'Markdown', ...options };
         await bot.sendMessage(chatId, text, sendOptions);
         return true;
     } catch (err) {
-        // If Markdown fails, try without formatting
         if (err.message.includes('parse') || err.message.includes('markdown')) {
             try {
                 await bot.sendMessage(chatId, text.replace(/[*_`[\]()]/g, ''), { ...options, parse_mode: undefined });
@@ -51,6 +49,25 @@ async function sendSafeMessage(chatId, text, options = {}) {
     }
 }
 
+// Check if user is member of a channel
+async function checkChannelMembership(chatId, channel) {
+    if (!bot) return false;
+    try {
+        // Remove @ from channel name if present
+        const channelName = channel.replace('@', '');
+        
+        // Get chat member information
+        const chatMember = await bot.getChatMember(`@${channelName}`, chatId);
+        
+        // Check if user is member (status: 'member', 'administrator', or 'creator')
+        const validStatuses = ['member', 'administrator', 'creator'];
+        return validStatuses.includes(chatMember.status);
+    } catch (err) {
+        console.error(`Error checking channel membership for ${channel}:`, err.message);
+        return false;
+    }
+}
+
 const initBot = (token) => {
     if (!token) {
         console.log('⚠️ No Telegram bot token provided');
@@ -58,7 +75,6 @@ const initBot = (token) => {
     }
     
     try {
-        // Disable polling in production to avoid conflicts
         const isProduction = process.env.NODE_ENV === 'production';
         bot = new TelegramBot(token, { polling: !isProduction });
         
@@ -67,7 +83,6 @@ const initBot = (token) => {
             setupBotHandlers();
         } else {
             console.log('🤖 Telegram Bot initialized (webhook mode)');
-            // Setup webhook if needed
             const webhookUrl = `${process.env.BACKEND_URL}/webhook/telegram`;
             bot.setWebHook(webhookUrl);
         }
@@ -86,33 +101,7 @@ function setupBotHandlers() {
     // Handle /start command
     bot.onText(/\/start/, (msg) => {
         const chatId = msg.chat.id;
-        const text = msg.text || '';
-        
-        // Check if token is provided in start command
-        const tokenMatch = text.match(/\/start\s+verify_([A-Za-z0-9_]+)/);
-        
-        if (tokenMatch) {
-            const verificationToken = tokenMatch[1];
-            handleVerificationStart(chatId, verificationToken);
-        } else {
-            sendWelcomeMessage(chatId);
-        }
-    });
-    
-    // Handle /verify command
-    bot.onText(/\/verify(?:\s+)?([A-Za-z0-9_]+)?/, async (msg, match) => {
-        const chatId = msg.chat.id;
-        const token = match[1];
-        
-        if (!token) {
-            return sendSafeMessage(chatId, 
-                '❌ Please provide verification token\n\n' +
-                'Usage: /verify YOUR_TOKEN\n\n' +
-                'Example: /verify VERIFY_abc123'
-            );
-        }
-        
-        await handleVerificationStart(chatId, token);
+        sendWelcomeMessage(chatId);
     });
     
     // Handle /id command
@@ -129,55 +118,21 @@ function setupBotHandlers() {
         const chatId = msg.chat.id;
         sendHelpMessage(chatId);
     });
-    
-    // Handle callback queries (for inline keyboards)
-    bot.on('callback_query', async (callbackQuery) => {
-        const msg = callbackQuery.message;
-        const chatId = msg.chat.id;
-        const data = callbackQuery.data;
-        
-        if (data.startsWith('verify_channel_')) {
-            const parts = data.split('_');
-            const channel = parts.slice(2, -1).join('_');
-            const token = parts[parts.length - 1];
-            await handleChannelVerification(callbackQuery, chatId, msg, channel, token);
-        }
-        else if (data === 'refresh_verification') {
-            const token = msg.text.match(/Token: `([^`]+)`/)?.[1];
-            if (token) {
-                await refreshVerificationStatus(callbackQuery, chatId, msg, token);
-            }
-        }
-        else if (data === 'open_app') {
-            await bot.answerCallbackQuery(callbackQuery.id, {
-                text: 'Opening app...',
-                url: process.env.FRONTEND_URL || 'https://muskilxlifafa.vercel.app'
-            });
-        }
-        else if (data.startsWith('open_channel_')) {
-            const channel = data.replace('open_channel_', '');
-            await bot.answerCallbackQuery(callbackQuery.id, {
-                text: `Opening ${channel}...`,
-                url: `https://t.me/${channel.replace('@', '')}`
-            });
-        }
-    });
 }
 
 // Send welcome message
 async function sendWelcomeMessage(chatId) {
     const welcomeMsg = `👋 Welcome to Lifafa Bot!\n\n` +
-        `This bot helps you verify channels for Lifafa claims.\n\n` +
+        `This bot helps verify your channel membership for Lifafa claims.\n\n` +
         `🔹 Commands\n` +
         `/id - Get your Telegram ID\n` +
-        `/verify <token> - Start verification\n` +
         `/help - Show help\n\n` +
-        `🔹 How to Verify\n` +
-        `1. Get verification link from app\n` +
-        `2. Click the link or use /verify command\n` +
-        `3. Join required channels\n` +
-        `4. Click verify buttons\n\n` +
-        `✅ Once verified, valid for 48 hours!`;
+        `🔹 How it Works\n` +
+        `1. Register on the website with your Telegram ID\n` +
+        `2. When claiming a lifafa with channels, you'll see join buttons\n` +
+        `3. Join the required channels\n` +
+        `4. Click Verify & Claim - we'll automatically check if you've joined\n\n` +
+        `✅ That's it! No separate verification needed.`;
     
     await sendSafeMessage(chatId, welcomeMsg);
 }
@@ -187,290 +142,11 @@ async function sendHelpMessage(chatId) {
     const helpMsg = `📖 Bot Commands Help\n\n` +
         `/start - Start the bot\n` +
         `/id - Get your Telegram ID\n` +
-        `/verify <token> - Verify channels using token\n` +
         `/help - Show this help\n\n` +
-        `🔹 Verification Process\n` +
-        `1. Get verification token from app\n` +
-        `2. Send /verify YOUR_TOKEN\n` +
-        `3. Join all channels listed\n` +
-        `4. Click ✅ Verify buttons\n` +
-        `5. All green = Verified! 🎉\n\n` +
-        `🔹 Important\n` +
-        `• Verification lasts 48 hours\n` +
-        `• Bot must be admin in channels\n` +
-        `• After verification, claim in app`;
+        `🔹 Need Support?\n` +
+        `Contact @LifafaSupport for any issues.`;
     
     await sendSafeMessage(chatId, helpMsg);
-}
-
-// Handle verification start
-async function handleVerificationStart(chatId, token) {
-    try {
-        // First, store user's chatId with this token
-        await fetch(`${API_URL}/api/verification/save-chatid`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token, chatId })
-        });
-        
-        // Get verification status
-        const response = await fetch(`${API_URL}/api/verification/status/${token}`);
-        const data = await response.json();
-        
-        if (!data.success) {
-            return sendSafeMessage(chatId, 
-                '❌ Invalid or expired verification token\n\n' +
-                'Please get a new verification link from the app.'
-            );
-        }
-        
-        const channels = data.channels;
-        const allVerified = data.allVerified;
-        
-        // Create verification message
-        let message = `🔐 Channel Verification\n\n`;
-        message += `Token: ${token}\n`;
-        message += `Status: ${allVerified ? '✅ VERIFIED' : '⏳ PENDING'}\n\n`;
-        
-        if (allVerified) {
-            message += `✅ All channels verified!\n\n`;
-            message += `You can now claim lifafas in the app.\n`;
-            message += `This verification is valid for 48 hours.\n\n`;
-            
-            const keyboard = {
-                inline_keyboard: [
-                    [{ text: '🚀 Open App', callback_data: 'open_app' }]
-                ]
-            };
-            
-            return bot.sendMessage(chatId, message, {
-                reply_markup: keyboard
-            });
-        }
-        
-        message += `📢 Required Channels\n\n`;
-        
-        // Build inline keyboard for channels
-        const keyboard = {
-            inline_keyboard: []
-        };
-        
-        channels.forEach((ch) => {
-            const status = ch.verified ? '✅' : '❌';
-            message += `${status} ${ch.name}\n`;
-            
-            if (!ch.verified) {
-                keyboard.inline_keyboard.push([
-                    { text: `📢 Join ${ch.name}`, callback_data: `open_channel_${ch.name}` }
-                ]);
-                keyboard.inline_keyboard.push([
-                    { text: `✅ Verify ${ch.name}`, callback_data: `verify_channel_${ch.name}_${token}` }
-                ]);
-            }
-        });
-        
-        message += `\n📌 Instructions:\n`;
-        message += `1. Click Join button for each channel\n`;
-        message += `2. Join the channel in Telegram\n`;
-        message += `3. Come back and click Verify\n`;
-        message += `4. Wait for green checkmark ✅\n\n`;
-        message += `⏱️ Verification valid for 48 hours`;
-        
-        // Add refresh button
-        keyboard.inline_keyboard.push([
-            { text: '🔄 Refresh Status', callback_data: 'refresh_verification' }
-        ]);
-        
-        await bot.sendMessage(chatId, message, {
-            reply_markup: keyboard
-        });
-        
-    } catch(err) {
-        console.error('Verification error:', err);
-        sendSafeMessage(chatId, '❌ Verification failed\n\nPlease try again later.');
-    }
-}
-
-// Handle channel verification
-async function handleChannelVerification(callbackQuery, chatId, msg, channel, token) {
-    try {
-        await bot.answerCallbackQuery(callbackQuery.id, {
-            text: `Verifying ${channel}...`,
-            show_alert: false
-        });
-        
-        // Call backend to verify
-        const response = await fetch(`${API_URL}/api/verification/verify`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-                token, 
-                channel,
-                chatId 
-            })
-        });
-        
-        const result = await response.json();
-        
-        if (result.success) {
-            // Get updated status
-            const statusRes = await fetch(`${API_URL}/api/verification/status/${token}`);
-            const statusData = await statusRes.json();
-            
-            // Update message
-            let newMessage = `🔐 Channel Verification\n\n`;
-            newMessage += `Token: ${token}\n`;
-            newMessage += `Status: ${statusData.allVerified ? '✅ VERIFIED' : '⏳ PENDING'}\n\n`;
-            
-            if (statusData.allVerified) {
-                newMessage += `✅ All channels verified!\n\n`;
-                newMessage += `You can now claim lifafas in the app.\n`;
-                newMessage += `This verification is valid for 48 hours.\n\n`;
-                
-                const keyboard = {
-                    inline_keyboard: [
-                        [{ text: '🚀 Open App', callback_data: 'open_app' }]
-                    ]
-                };
-                
-                await bot.editMessageText(newMessage, {
-                    chat_id: chatId,
-                    message_id: msg.message_id,
-                    reply_markup: keyboard
-                });
-                
-                // Send success notification
-                await sendSafeMessage(chatId, 
-                    `🎉 Verification Complete!\n\n` +
-                    `✅ All channels verified!\n` +
-                    `You can now claim lifafas in the app.`
-                );
-                
-            } else {
-                newMessage += `📢 Required Channels\n\n`;
-                
-                const keyboard = { inline_keyboard: [] };
-                
-                statusData.channels.forEach((ch) => {
-                    const status = ch.verified ? '✅' : '❌';
-                    newMessage += `${status} ${ch.name}\n`;
-                    
-                    if (!ch.verified) {
-                        keyboard.inline_keyboard.push([
-                            { text: `📢 Join ${ch.name}`, callback_data: `open_channel_${ch.name}` }
-                        ]);
-                        keyboard.inline_keyboard.push([
-                            { text: `✅ Verify ${ch.name}`, callback_data: `verify_channel_${ch.name}_${token}` }
-                        ]);
-                    }
-                });
-                
-                newMessage += `\n📌 Instructions:\n`;
-                newMessage += `1. Click Join button for each channel\n`;
-                newMessage += `2. Join the channel in Telegram\n`;
-                newMessage += `3. Come back and click Verify\n`;
-                newMessage += `4. Wait for green checkmark ✅`;
-                
-                keyboard.inline_keyboard.push([
-                    { text: '🔄 Refresh Status', callback_data: 'refresh_verification' }
-                ]);
-                
-                await bot.editMessageText(newMessage, {
-                    chat_id: chatId,
-                    message_id: msg.message_id,
-                    reply_markup: keyboard
-                });
-            }
-            
-            // Send verification success notification
-            await sendSafeMessage(chatId, 
-                `✅ ${channel} verified!\n\n` +
-                `${statusData.allVerified ? '🎉 All channels verified!' : 'Keep verifying remaining channels.'}`
-            );
-            
-        } else {
-            await bot.answerCallbackQuery(callbackQuery.id, {
-                text: result.msg || '❌ Not a member yet. Join first!',
-                show_alert: true
-            });
-        }
-    } catch(err) {
-        console.error('Channel verification error:', err);
-        await bot.answerCallbackQuery(callbackQuery.id, {
-            text: '❌ Verification failed',
-            show_alert: true
-        });
-    }
-}
-
-// Refresh verification status
-async function refreshVerificationStatus(callbackQuery, chatId, msg, token) {
-    try {
-        await bot.answerCallbackQuery(callbackQuery.id, {
-            text: 'Refreshing status...',
-            show_alert: false
-        });
-        
-        const statusRes = await fetch(`${API_URL}/api/verification/status/${token}`);
-        const statusData = await statusRes.json();
-        
-        if (!statusData.success) {
-            return sendSafeMessage(chatId, '❌ Token expired');
-        }
-        
-        let newMessage = `🔐 Channel Verification\n\n`;
-        newMessage += `Token: ${token}\n`;
-        newMessage += `Status: ${statusData.allVerified ? '✅ VERIFIED' : '⏳ PENDING'}\n\n`;
-        
-        if (statusData.allVerified) {
-            newMessage += `✅ All channels verified!\n\n`;
-            newMessage += `You can now claim lifafas in the app.\n`;
-            newMessage += `This verification is valid for 48 hours.\n\n`;
-            
-            const keyboard = {
-                inline_keyboard: [
-                    [{ text: '🚀 Open App', callback_data: 'open_app' }]
-                ]
-            };
-            
-            await bot.editMessageText(newMessage, {
-                chat_id: chatId,
-                message_id: msg.message_id,
-                reply_markup: keyboard
-            });
-        } else {
-            newMessage += `📢 Required Channels\n\n`;
-            
-            const keyboard = { inline_keyboard: [] };
-            
-            statusData.channels.forEach((ch) => {
-                const status = ch.verified ? '✅' : '❌';
-                newMessage += `${status} ${ch.name}\n`;
-                
-                if (!ch.verified) {
-                    keyboard.inline_keyboard.push([
-                        { text: `📢 Join ${ch.name}`, callback_data: `open_channel_${ch.name}` }
-                    ]);
-                    keyboard.inline_keyboard.push([
-                        { text: `✅ Verify ${ch.name}`, callback_data: `verify_channel_${ch.name}_${token}` }
-                    ]);
-                }
-            });
-            
-            keyboard.inline_keyboard.push([
-                { text: '🔄 Refresh Status', callback_data: 'refresh_verification' }
-            ]);
-            
-            await bot.editMessageText(newMessage, {
-                chat_id: chatId,
-                message_id: msg.message_id,
-                reply_markup: keyboard
-            });
-        }
-        
-    } catch(err) {
-        console.error('Refresh error:', err);
-    }
 }
 
 // Send OTP
@@ -554,6 +230,7 @@ const sendMessage = async (chatId, text, options = {}) => {
 
 module.exports = {
     initBot,
+    checkChannelMembership,
     sendOTP,
     sendLoginAlert,
     sendTransactionAlert,
