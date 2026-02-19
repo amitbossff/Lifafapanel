@@ -2145,6 +2145,158 @@ app.use((err, req, res, next) => {
     });
 });
 
+// Add these endpoints to your backend
+
+// ==================== CHANNEL VERIFICATION ROUTES ====================
+
+// Check if bot is admin in channel
+app.post('/api/channel/check-admin', async (req, res) => {
+    try {
+        const { channel } = req.body;
+        
+        if (!channel) {
+            return res.json({ success: false, msg: 'Channel required' });
+        }
+        
+        // In production, this would call Telegram API to check if bot is admin
+        // For demo, we'll simulate based on channel name
+        const botUsername = 'LIFAFAXAMITBOT';
+        
+        // Simulate admin check - in real app, call Telegram API
+        const isAdmin = !channel.includes('invalid'); // Demo logic
+        
+        res.json({
+            success: true,
+            channel,
+            isAdmin,
+            botUsername,
+            msg: isAdmin ? 'Bot is admin' : 'Bot is not admin in this channel'
+        });
+        
+    } catch(err) {
+        console.error('Check admin error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to check admin status' });
+    }
+});
+
+// Generate verification link
+app.post('/api/channel/generate-verification', async (req, res) => {
+    try {
+        const { channels, userId, lifafaCode } = req.body;
+        
+        if (!channels || !Array.isArray(channels) || !userId || !lifafaCode) {
+            return res.json({ success: false, msg: 'Missing required fields' });
+        }
+        
+        // Generate unique verification token
+        const verificationToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+        
+        // Store verification request (in production, save to database)
+        // For demo, we'll use a Map
+        verificationRequests.set(verificationToken, {
+            userId,
+            lifafaCode,
+            channels,
+            createdAt: Date.now(),
+            verifiedChannels: []
+        });
+        
+        const baseUrl = process.env.FRONTEND_URL || 'https://muskilxlifafa.vercel.app';
+        const verificationLink = `${baseUrl}/verify-channels?token=${verificationToken}`;
+        
+        res.json({
+            success: true,
+            verificationToken,
+            verificationLink,
+            botUsername: 'LIFAFAXAMITBOT'
+        });
+        
+    } catch(err) {
+        console.error('Generate verification error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to generate verification' });
+    }
+});
+
+// Verify channel membership (called by bot)
+app.post('/api/channel/verify-membership', async (req, res) => {
+    try {
+        const { userId, channel } = req.body;
+        
+        if (!userId || !channel) {
+            return res.json({ success: false, msg: 'Missing required fields' });
+        }
+        
+        // In production, this would be called by your bot after user joins
+        // For demo, we'll simulate verification
+        
+        // Find user's verification request
+        // Update verified channels list
+        
+        res.json({
+            success: true,
+            userId,
+            channel,
+            verified: true,
+            msg: 'Channel verified'
+        });
+        
+    } catch(err) {
+        console.error('Verify membership error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to verify' });
+    }
+});
+
+// Get verification status
+app.get('/api/channel/verification-status/:token', async (req, res) => {
+    try {
+        const { token } = req.params;
+        
+        // In production, fetch from database
+        // For demo, return simulated data
+        
+        res.json({
+            success: true,
+            token,
+            channels: [
+                { name: '@channel1', verified: true },
+                { name: '@channel2', verified: false },
+                { name: '@channel3', verified: true }
+            ],
+            allVerified: false
+        });
+        
+    } catch(err) {
+        console.error('Get verification status error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to get status' });
+    }
+});
+
+// Mark channel as verified (called when user joins)
+app.post('/api/channel/mark-verified', async (req, res) => {
+    try {
+        const { token, channel } = req.body;
+        
+        if (!token || !channel) {
+            return res.json({ success: false, msg: 'Missing required fields' });
+        }
+        
+        // In production, update database
+        // For demo, we'll just return success
+        
+        res.json({
+            success: true,
+            token,
+            channel,
+            verified: true,
+            msg: 'Channel marked as verified'
+        });
+        
+    } catch(err) {
+        console.error('Mark verified error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to mark verified' });
+    }
+});
+
 // ==================== START SERVER ====================
 const PORT = process.env.PORT || 5000;
 const server = app.listen(PORT, () => {
