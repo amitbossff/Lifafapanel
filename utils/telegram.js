@@ -1,7 +1,6 @@
 const TelegramBot = require('node-telegram-bot-api');
 
 let bot = null;
-const API_URL = process.env.BACKEND_URL || 'https://lifafa-backend.onrender.com';
 
 // Helper function to escape Markdown
 function escapeMarkdown(text) {
@@ -37,7 +36,9 @@ async function sendSafeMessage(chatId, text, options = {}) {
     } catch (err) {
         if (err.message.includes('parse') || err.message.includes('markdown')) {
             try {
-                await bot.sendMessage(chatId, text.replace(/[*_`[\]()]/g, ''), { ...options, parse_mode: undefined });
+                // Remove markdown characters and try again
+                const plainText = text.replace(/[*_`[\]()]/g, '');
+                await bot.sendMessage(chatId, plainText, { ...options, parse_mode: undefined });
                 return true;
             } catch (secondErr) {
                 console.error('Both send attempts failed:', secondErr.message);
@@ -49,7 +50,7 @@ async function sendSafeMessage(chatId, text, options = {}) {
     }
 }
 
-// ✅ FIXED: Check if user is member of a channel using actual Telegram API
+// Check channel membership
 async function checkChannelMembership(chatId, channel) {
     if (!bot) {
         console.log('⚠️ Bot not initialized, cannot check membership');
@@ -57,17 +58,14 @@ async function checkChannelMembership(chatId, channel) {
     }
     
     try {
-        // Remove @ from channel name if present
         const channelName = channel.replace('@', '');
         
         console.log(`🔍 Checking membership for user ${chatId} in channel @${channelName}`);
         
-        // Get chat member information from Telegram
         const chatMember = await bot.getChatMember(`@${channelName}`, chatId);
         
         console.log(`📊 Member status: ${chatMember.status}`);
         
-        // Check if user is member (status: 'member', 'administrator', or 'creator')
         const validStatuses = ['member', 'administrator', 'creator'];
         const isMember = validStatuses.includes(chatMember.status);
         
@@ -77,7 +75,6 @@ async function checkChannelMembership(chatId, channel) {
     } catch (err) {
         console.error(`❌ Error checking channel membership for ${channel}:`, err.message);
         
-        // Specific error handling
         if (err.message.includes('chat not found')) {
             console.log(`⚠️ Channel @${channel} not found or bot is not admin`);
         } else if (err.message.includes('user not found')) {
@@ -88,6 +85,7 @@ async function checkChannelMembership(chatId, channel) {
     }
 }
 
+// Initialize bot
 const initBot = (token) => {
     if (!token) {
         console.log('⚠️ No Telegram bot token provided');
@@ -95,7 +93,6 @@ const initBot = (token) => {
     }
     
     try {
-        // Use polling mode
         bot = new TelegramBot(token, { 
             polling: true,
             polling: {
@@ -131,7 +128,7 @@ function setupBotHandlers() {
     bot.onText(/\/id/, (msg) => {
         const chatId = msg.chat.id;
         sendSafeMessage(chatId, 
-            `📱 Your Telegram ID\n\n${chatId}\n\n` +
+            `📱 Your Telegram ID\n\n\`${chatId}\`\n\n` +
             `Use this ID for registration`
         );
     });
@@ -142,7 +139,7 @@ function setupBotHandlers() {
         sendHelpMessage(chatId);
     });
     
-    // Handle /check command - for testing
+    // Handle /check command
     bot.onText(/\/check (.+)/, async (msg, match) => {
         const chatId = msg.chat.id;
         const channel = match[1];
@@ -156,6 +153,13 @@ function setupBotHandlers() {
         }
     });
     
+    // Handle /balance command
+    bot.onText(/\/balance/, async (msg) => {
+        const chatId = msg.chat.id;
+        // This will be handled by the main bot instance with access to User model
+        // The message will be sent from the main index.js
+    });
+    
     // Error handler
     bot.on('polling_error', (error) => {
         console.log('⚠️ Telegram polling error:', error.message);
@@ -166,30 +170,32 @@ function setupBotHandlers() {
 
 // Send welcome message
 async function sendWelcomeMessage(chatId) {
-    const welcomeMsg = `👋 Welcome to Lifafa Bot!\n\n` +
-        `This bot helps verify your channel membership for Lifafa claims.\n\n` +
-        `🔹 Commands\n` +
+    const welcomeMsg = `👋 *Welcome to MuskilxLifafa Bot!*\n\n` +
+        `This bot helps you verify channel membership and receive notifications.\n\n` +
+        `🔹 *Commands*\n` +
         `/id - Get your Telegram ID\n` +
         `/check <channel> - Check if you're in a channel\n` +
+        `/balance - Check your balance\n` +
         `/help - Show help\n\n` +
-        `🔹 How it Works\n` +
+        `🔹 *How it Works*\n` +
         `1. Register on the website with your Telegram ID\n` +
         `2. When claiming a lifafa with channels, you'll see join buttons\n` +
         `3. Join the required channels\n` +
         `4. Click Verify - we'll automatically check if you've joined\n\n` +
-        `✅ That's it!`;
+        `✅ *That's it!*`;
     
     await sendSafeMessage(chatId, welcomeMsg);
 }
 
 // Send help message
 async function sendHelpMessage(chatId) {
-    const helpMsg = `📖 Bot Commands Help\n\n` +
+    const helpMsg = `📖 *Bot Commands Help*\n\n` +
         `/start - Start the bot\n` +
         `/id - Get your Telegram ID\n` +
         `/check <channel> - Check channel membership\n` +
+        `/balance - Check your balance\n` +
         `/help - Show this help\n\n` +
-        `🔹 Need Support?\n` +
+        `🔹 *Need Support?*\n` +
         `Contact @LifafaSupport for any issues.`;
     
     await sendSafeMessage(chatId, helpMsg);
@@ -200,7 +206,7 @@ const sendOTP = async (chatId, otp) => {
     if (!bot) return false;
     try {
         await sendSafeMessage(chatId, 
-            `🔐 Lifafa OTP\n\nYour OTP: ${otp}\n\nValid for 5 minutes`
+            `🔐 *Lifafa OTP*\n\nYour OTP: \`${otp}\`\n\nValid for 5 minutes`
         );
         return true;
     } catch(err) {
@@ -213,7 +219,11 @@ const sendLoginAlert = async (chatId, user, ip) => {
     if (!bot) return;
     try {
         await sendSafeMessage(chatId,
-            `🔐 Login Alert\n\n👤 Username: ${user.username}\n📱 Number: ${user.number}\n⏰ Time: ${new Date().toLocaleString()}\n🌐 IP: ${ip || 'Unknown'}`
+            `🔐 *Login Alert*\n\n` +
+            `👤 Username: ${user.username}\n` +
+            `📱 Number: ${user.number}\n` +
+            `⏰ Time: ${new Date().toLocaleString()}\n` +
+            `🌐 IP: ${ip || 'Unknown'}`
         );
     } catch(err) {}
 };
@@ -225,7 +235,11 @@ const sendTransactionAlert = async (chatId, type, amount, balance, description) 
         const emoji = type === 'credit' ? '💰' : '💸';
         const sign = type === 'credit' ? '+' : '-';
         await sendSafeMessage(chatId,
-            `${emoji} Transaction\n\nType: ${type.toUpperCase()}\nAmount: ${sign}₹${amount}\nBalance: ₹${balance}\nDescription: ${description}`
+            `${emoji} *Transaction*\n\n` +
+            `Type: ${type.toUpperCase()}\n` +
+            `Amount: ${sign}₹${amount}\n` +
+            `Balance: ₹${balance}\n` +
+            `Description: ${description}`
         );
     } catch(err) {}
 };
@@ -234,9 +248,16 @@ const sendTransactionAlert = async (chatId, type, amount, balance, description) 
 const sendWithdrawalAlert = async (chatId, amount, status) => {
     if (!bot) return;
     try {
-        const emoji = { 'pending': '⏳', 'approved': '✅', 'rejected': '❌', 'refunded': '↩️' };
+        const emoji = { 
+            'pending': '⏳', 
+            'approved': '✅', 
+            'rejected': '❌', 
+            'refunded': '↩️' 
+        };
         await sendSafeMessage(chatId,
-            `💸 Withdrawal ${status.toUpperCase()}\n\nStatus: ${emoji[status]} ${status}\nAmount: ₹${amount}`
+            `💸 *Withdrawal ${status.toUpperCase()}*\n\n` +
+            `Status: ${emoji[status]} ${status}\n` +
+            `Amount: ₹${amount}`
         );
     } catch(err) {}
 };
@@ -248,7 +269,10 @@ const sendLifafaAlert = async (chatId, lifafa) => {
         const baseUrl = process.env.FRONTEND_URL || 'https://muskilxlifafa.vercel.app';
         const claimLink = `${baseUrl}/claimlifafa.html?code=${lifafa.code}`;
         await sendSafeMessage(chatId,
-            `🎁 New Lifafa Created!\n\n📌 Title: ${lifafa.title}\n💰 Amount: ₹${lifafa.amount}\n🔗 Link: ${claimLink}`
+            `🎁 *New Lifafa Created!*\n\n` +
+            `📌 Title: ${lifafa.title}\n` +
+            `💰 Amount: ₹${lifafa.amount}\n` +
+            `🔗 Link: ${claimLink}`
         );
     } catch(err) {}
 };
@@ -258,7 +282,10 @@ const sendLifafaClaimAlert = async (chatId, lifafa, balance) => {
     if (!bot) return;
     try {
         await sendSafeMessage(chatId,
-            `🧧 Lifafa Claimed!\n\n📌 Title: ${lifafa.title}\n💰 Amount: +₹${lifafa.amount}\n💳 Balance: ₹${balance}`
+            `🧧 *Lifafa Claimed!*\n\n` +
+            `📌 Title: ${lifafa.title}\n` +
+            `💰 Amount: +₹${lifafa.amount}\n` +
+            `💳 Balance: ₹${balance}`
         );
     } catch(err) {}
 };
