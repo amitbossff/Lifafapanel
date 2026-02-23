@@ -364,12 +364,6 @@ const authMiddleware = async (req, res, next) => {
         if (!user) return res.status(401).json({ success: false, msg: 'User not found' });
         if (user.isBlocked) return res.status(403).json({ success: false, msg: 'Account is blocked' });
         
-        // Update session last seen
-        await Session.findOneAndUpdate(
-            { token },
-            { $set: { lastSeen: new Date() } }
-        );
-        
         req.userId = decoded.userId;
         req.user = user;
         req.token = token;
@@ -597,6 +591,7 @@ app.post('/api/auth/send-login-otp', async (req, res) => {
         otpStore.set(`login_${number}`, {
             otp,
             userId: user._id,
+            telegramUid: user.telegramUid,
             expires: Date.now() + 5 * 60 * 1000
         });
         
@@ -606,59 +601,73 @@ app.post('/api/auth/send-login-otp', async (req, res) => {
         
         res.json({ success: true, msg: 'OTP sent' });
     } catch(err) {
+        console.error('Send login OTP error:', err);
         res.status(500).json({ success: false, msg: 'Failed to send OTP' });
     }
 });
 
+// ✅ FIXED: Login OTP Verification
 app.post('/api/auth/verify-login-otp', async (req, res) => {
     try {
-        const { number, otp, ip, deviceInfo } = req.body;
+        const { number, otp, ip } = req.body;
+        
+        console.log(`🔐 Login attempt - Number: ${number}, OTP: ${otp}`);
         
         if (!number || !otp) {
             return res.json({ success: false, msg: 'Number and OTP required' });
         }
         
         const stored = otpStore.get(`login_${number}`);
-        if (!stored || stored.otp !== otp) {
+        if (!stored) {
+            console.log('❌ No OTP found for this number');
+            return res.json({ success: false, msg: 'OTP expired or not requested' });
+        }
+        
+        console.log(`📝 Stored OTP: ${stored.otp}, UserId: ${stored.userId}`);
+        
+        if (stored.otp !== otp) {
+            console.log('❌ OTP mismatch');
             return res.json({ success: false, msg: 'Invalid OTP' });
         }
         
         if (Date.now() > stored.expires) {
+            console.log('❌ OTP expired');
             otpStore.delete(`login_${number}`);
             return res.json({ success: false, msg: 'OTP expired' });
         }
         
         const user = await User.findById(stored.userId);
         if (!user) {
+            console.log('❌ User not found');
             return res.json({ success: false, msg: 'User not found' });
         }
+        
+        console.log(`✅ User found: ${user.username}`);
         
         // Update last login
         user.lastLogin = new Date();
         user.lastLoginIp = ip;
         await user.save();
         
-        // Create session token
-        const sessionToken = generateSessionToken();
-        const jwtToken = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+        // Create JWT token
+        const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
         
-        // Save session
+        // Create session
+        const sessionToken = generateSessionToken();
         await new Session({
             userId: user._id,
             token: sessionToken,
-            deviceInfo: deviceInfo || 'Unknown device',
+            deviceInfo: req.headers['user-agent'] || 'Unknown device',
             ip
         }).save();
         
-        // Send login alert
-        await sendLoginAlert(user.telegramUid, user, ip);
+        console.log(`✅ Login successful for ${user.username}`);
         
         otpStore.delete(`login_${number}`);
         
         res.json({ 
             success: true,
-            token: jwtToken,
-            sessionToken,
+            token,
             user: { 
                 number: user.number, 
                 balance: user.balance, 
@@ -667,7 +676,8 @@ app.post('/api/auth/verify-login-otp', async (req, res) => {
         });
         
     } catch(err) {
-        res.status(500).json({ success: false, msg: 'Login failed' });
+        console.error('❌ Verify login OTP error:', err);
+        res.status(500).json({ success: false, msg: 'Login failed: ' + err.message });
     }
 });
 
@@ -692,11 +702,12 @@ app.post('/api/auth/resend-otp', async (req, res) => {
         otpStore.set(key, stored);
         
         if (bot) {
-            await bot.sendMessage(stored.telegramUid || stored.userId, `🔐 *New OTP*\n\nOTP: \`${otp}\`\nValid for 5 minutes`, { parse_mode: 'Markdown' });
+            await bot.sendMessage(stored.telegramUid, `🔐 *New OTP*\n\nOTP: \`${otp}\`\nValid for 5 minutes`, { parse_mode: 'Markdown' });
         }
         
         res.json({ success: true, msg: 'OTP resent' });
     } catch(err) {
+        console.error('Resend OTP error:', err);
         res.status(500).json({ success: false, msg: 'Failed to resend' });
     }
 });
@@ -1912,7 +1923,7 @@ app.post('/api/admin/create-account', adminMiddleware, async (req, res) => {
             return res.json({ success: false, msg: 'Number already registered' });
         }
         
-        // Allow multiple accounts with same Telegram ID - removed the check
+        // ✅ ALLOW multiple accounts with same Telegram ID - removed the check
         
         const hashedPassword = bcrypt.hashSync(password, 10);
         
@@ -2055,6 +2066,8 @@ app.post('/api/admin/delete-user', adminMiddleware, async (req, res) => {
     try {
         const { userId, reason } = req.body;
         
+        console.log(`🗑️ Delete user request - UserId: ${userId}, Reason: ${reason}`);
+        
         if (!userId) {
             return res.json({ success: false, msg: 'User ID required' });
         }
@@ -2062,22 +2075,23 @@ app.post('/api/admin/delete-user', adminMiddleware, async (req, res) => {
         // Find user first
         const user = await User.findById(userId);
         if (!user) {
+            console.log('❌ User not found');
             return res.json({ success: false, msg: 'User not found' });
         }
         
-        console.log(`🗑️ Deleting user: ${user.username} (${user.number})`);
+        console.log(`✅ User found: ${user.username} (${user.number})`);
         
         // Delete user's sessions
         await Session.deleteMany({ userId: user._id });
+        console.log(`✅ Sessions deleted`);
         
         // Delete user's transactions
         await Transaction.deleteMany({ userId: user._id });
+        console.log(`✅ Transactions deleted`);
         
         // Delete user's withdrawals
         await Withdrawal.deleteMany({ userId: user._id });
-        
-        // Delete user's lifafas (optional - you might want to keep them)
-        // await Lifafa.deleteMany({ createdBy: user._id });
+        console.log(`✅ Withdrawals deleted`);
         
         // Create log before deletion
         await createAdminLog(req.adminId, 'delete_user', { 
@@ -2085,10 +2099,10 @@ app.post('/api/admin/delete-user', adminMiddleware, async (req, res) => {
             username: user.username, 
             reason 
         }, req);
+        console.log(`✅ Log created`);
         
         // Delete the user
         await User.findByIdAndDelete(userId);
-        
         console.log(`✅ User deleted successfully: ${user.username}`);
         
         res.json({ success: true, msg: 'User deleted successfully' });
@@ -2560,6 +2574,7 @@ const server = app.listen(PORT, () => {
     console.log(`✅ Channel verification system active`);
     console.log(`✅ TXN ID generation enabled`);
     console.log(`✅ Session tracking enabled`);
+    console.log(`✅ OTP login fixed`);
     console.log(`✅ Admin create account fixed (multiple accounts allowed)`);
     console.log(`✅ Delete user error fixed`);
     console.log(`✅ Pay to user shows username instead of number`);
