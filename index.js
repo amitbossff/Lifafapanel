@@ -241,8 +241,8 @@ const TransactionSchema = new mongoose.Schema({
     },
     amount: { type: Number, required: true },
     description: String,
-    senderInfo: { type: String }, // For pay_sent, store receiver info
-    receiverInfo: { type: String }, // For pay_received, store sender info
+    senderInfo: { type: String }, // For pay_received, store sender username
+    receiverInfo: { type: String }, // For pay_sent, store receiver username
     createdAt: { type: Date, default: Date.now, index: true }
 });
 
@@ -811,7 +811,7 @@ app.get('/api/user/transactions', authMiddleware, async (req, res) => {
     }
 });
 
-// UPDATED: Pay to user with sender username instead of number
+// Pay to user with sender username instead of number
 app.post('/api/user/pay', authMiddleware, async (req, res) => {
     try {
         const { receiverNumber, amount } = req.body;
@@ -1092,49 +1092,69 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
         const { code } = req.body;
         const user = req.user;
         
-        if (!code || !/^LIF[A-Z0-9]+$/.test(code)) {
-            return res.json({ success: false, msg: 'Invalid code' });
+        console.log(`📝 Claim attempt - User: ${user.number}, Code: ${code}`);
+        
+        if (!code) {
+            console.log('❌ No code provided');
+            return res.json({ success: false, msg: 'Code required' });
+        }
+        
+        // More flexible code validation
+        if (!code.startsWith('LIF')) {
+            console.log('❌ Invalid code format - does not start with LIF');
+            return res.json({ success: false, msg: 'Invalid code format' });
         }
         
         const lifafa = await Lifafa.findOne({ code, isActive: true });
         if (!lifafa) {
+            console.log(`❌ Lifafa not found or inactive: ${code}`);
             return res.json({ success: false, msg: 'Invalid or expired code' });
         }
         
+        console.log(`✅ Lifafa found: ${lifafa.title}, Amount: ${lifafa.amount}`);
+        
         // Check if user is blocked from this creator
         if (user.blockedNumbers && user.blockedNumbers.includes(lifafa.createdBy?.toString())) {
+            console.log(`❌ User blocked from this creator`);
             return res.json({ success: false, msg: 'You are blocked from claiming this lifafa' });
         }
         
         // Check if lifafa is for this number
         if (lifafa.numbers && lifafa.numbers.length > 0) {
             if (!lifafa.numbers.includes(user.number)) {
+                console.log(`❌ User not eligible for this private lifafa`);
                 return res.json({ success: false, msg: 'Not eligible for this lifafa' });
             }
         }
         
         // Check if already claimed
         if (lifafa.claimedNumbers && lifafa.claimedNumbers.includes(user.number)) {
+            console.log(`❌ Already claimed by this user`);
             return res.json({ success: false, msg: 'Already claimed' });
         }
         
         // Check channel verification if required
         if (lifafa.channelRequired && lifafa.channels && lifafa.channels.length > 0) {
+            console.log(`🔍 Checking channel membership for ${lifafa.channels.length} channels`);
+            
             // Verify channel membership via Telegram
             const verification = await checkChannelMembership(user.telegramUid, lifafa.channels);
             
             if (!verification.success) {
+                console.log(`❌ Channel verification failed:`, verification.missingChannels);
                 return res.json({ 
                     success: false, 
                     msg: 'Channels not verified',
                     missingChannels: verification.missingChannels
                 });
             }
+            console.log(`✅ All channels verified`);
         }
         
         // Check if fully claimed
         const totalAllowed = lifafa.totalUsers || lifafa.numbers?.length || 999999;
         if (lifafa.claimedCount >= totalAllowed) {
+            console.log(`❌ Lifafa fully claimed`);
             lifafa.isActive = false;
             await lifafa.save();
             return res.json({ success: false, msg: 'This lifafa is fully claimed' });
@@ -1165,6 +1185,8 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
             description: `Claimed Lifafa: ${lifafa.title}`
         }).save();
         
+        console.log(`✅ Claim successful! Amount: ${lifafa.amount}, TXN: ${txnId}`);
+        
         if (bot) {
             await bot.sendMessage(user.telegramUid,
                 `🎉 *Lifafa Claimed!*\n\nTXN ID: \`${txnId}\`\nTitle: ${lifafa.title}\nAmount: +₹${lifafa.amount}\nBalance: ₹${user.balance}`,
@@ -1181,8 +1203,8 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
         });
         
     } catch(err) {
-        console.error('Claim lifafa error:', err);
-        res.status(500).json({ success: false, msg: 'Claim failed' });
+        console.error('❌ Claim lifafa error:', err);
+        res.status(500).json({ success: false, msg: 'Claim failed: ' + err.message });
     }
 });
 
@@ -1702,56 +1724,6 @@ app.get('/api/admin/users', adminMiddleware, async (req, res) => {
     }
 });
 
-// FIXED: Create account without OTP
-app.post('/api/admin/create-account', adminMiddleware, async (req, res) => {
-    try {
-        const { username, number, telegramUid, password } = req.body;
-        
-        if (!username || !number || !telegramUid || !password) {
-            return res.json({ success: false, msg: 'All fields required' });
-        }
-        
-        if (!/^\d{10}$/.test(number)) {
-            return res.json({ success: false, msg: 'Invalid number format' });
-        }
-        
-        if (username.length < 3) {
-            return res.json({ success: false, msg: 'Username must be at least 3 characters' });
-        }
-        
-        if (password.length < 6) {
-            return res.json({ success: false, msg: 'Password must be at least 6 characters' });
-        }
-        
-        // Check if number exists
-        const existingUser = await User.findOne({ number });
-        if (existingUser) {
-            return res.json({ success: false, msg: 'Number already registered' });
-        }
-        
-        // Allow multiple accounts with same Telegram ID (no check)
-        
-        const hashedPassword = bcrypt.hashSync(password, 10);
-        
-        const user = new User({
-            username,
-            number,
-            password: hashedPassword,
-            telegramUid,
-            balance: 0
-        });
-        
-        await user.save();
-        
-        await createAdminLog(req.adminId, 'create_account', { username, number, telegramUid }, req);
-        
-        res.json({ success: true, msg: 'Account created', user: { username, number, telegramUid } });
-    } catch(err) {
-        console.error('Create account error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to create account: ' + err.message });
-    }
-});
-
 // Get single user details
 app.get('/api/admin/user/:userId', adminMiddleware, async (req, res) => {
     try {
@@ -1806,6 +1778,56 @@ app.post('/api/admin/logout-user', adminMiddleware, async (req, res) => {
     } catch(err) {
         console.error('Logout user error:', err);
         res.status(500).json({ success: false, msg: 'Failed to logout user' });
+    }
+});
+
+// FIXED: Create account without OTP
+app.post('/api/admin/create-account', adminMiddleware, async (req, res) => {
+    try {
+        const { username, number, telegramUid, password } = req.body;
+        
+        if (!username || !number || !telegramUid || !password) {
+            return res.json({ success: false, msg: 'All fields required' });
+        }
+        
+        if (!/^\d{10}$/.test(number)) {
+            return res.json({ success: false, msg: 'Invalid number format' });
+        }
+        
+        if (username.length < 3) {
+            return res.json({ success: false, msg: 'Username must be at least 3 characters' });
+        }
+        
+        if (password.length < 6) {
+            return res.json({ success: false, msg: 'Password must be at least 6 characters' });
+        }
+        
+        // Check if number exists
+        const existingUser = await User.findOne({ number });
+        if (existingUser) {
+            return res.json({ success: false, msg: 'Number already registered' });
+        }
+        
+        // Allow multiple accounts with same Telegram ID (no check)
+        
+        const hashedPassword = bcrypt.hashSync(password, 10);
+        
+        const user = new User({
+            username,
+            number,
+            password: hashedPassword,
+            telegramUid,
+            balance: 0
+        });
+        
+        await user.save();
+        
+        await createAdminLog(req.adminId, 'create_account', { username, number, telegramUid }, req);
+        
+        res.json({ success: true, msg: 'Account created', user: { username, number, telegramUid } });
+    } catch(err) {
+        console.error('Create account error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to create account: ' + err.message });
     }
 });
 
