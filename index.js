@@ -296,11 +296,13 @@ const AdminSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now }
 });
 
-// Session Model (for admin user login)
+// Session Model (for tracking user logins)
 const SessionSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-    adminId: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin', required: true },
-    createdAt: { type: Date, default: Date.now, expires: 3600 } // 1 hour session
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    token: { type: String, required: true, unique: true },
+    deviceInfo: { type: String },
+    ip: String,
+    createdAt: { type: Date, default: Date.now, expires: 7*24*60*60 } // Auto delete after 7 days
 });
 
 // Log Model
@@ -328,6 +330,8 @@ LifafaSchema.index({ code: 1 });
 LifafaSchema.index({ createdBy: 1, isActive: 1 });
 TransactionSchema.index({ userId: 1, createdAt: -1 });
 WithdrawalSchema.index({ userId: 1, status: 1 });
+SessionSchema.index({ userId: 1 });
+SessionSchema.index({ token: 1 });
 
 // Create default admin
 async function createDefaultAdmin() {
@@ -360,8 +364,15 @@ const authMiddleware = async (req, res, next) => {
         if (!user) return res.status(401).json({ success: false, msg: 'User not found' });
         if (user.isBlocked) return res.status(403).json({ success: false, msg: 'Account is blocked' });
         
+        // Update session last seen
+        await Session.findOneAndUpdate(
+            { token },
+            { $set: { lastSeen: new Date() } }
+        );
+        
         req.userId = decoded.userId;
         req.user = user;
+        req.token = token;
         next();
     } catch(err) {
         if (err.name === 'TokenExpiredError') {
@@ -397,6 +408,11 @@ function generateTxnId(prefix = 'TXN') {
     const timestamp = Date.now().toString(36).toUpperCase();
     const random = crypto.randomBytes(4).toString('hex').toUpperCase();
     return prefix + timestamp + random;
+}
+
+// Generate session token
+function generateSessionToken() {
+    return crypto.randomBytes(32).toString('hex');
 }
 
 // OTP Store
@@ -596,7 +612,7 @@ app.post('/api/auth/send-login-otp', async (req, res) => {
 
 app.post('/api/auth/verify-login-otp', async (req, res) => {
     try {
-        const { number, otp, ip } = req.body;
+        const { number, otp, ip, deviceInfo } = req.body;
         
         if (!number || !otp) {
             return res.json({ success: false, msg: 'Number and OTP required' });
@@ -617,17 +633,32 @@ app.post('/api/auth/verify-login-otp', async (req, res) => {
             return res.json({ success: false, msg: 'User not found' });
         }
         
+        // Update last login
         user.lastLogin = new Date();
         user.lastLoginIp = ip;
         await user.save();
         
-        const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+        // Create session token
+        const sessionToken = generateSessionToken();
+        const jwtToken = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+        
+        // Save session
+        await new Session({
+            userId: user._id,
+            token: sessionToken,
+            deviceInfo: deviceInfo || 'Unknown device',
+            ip
+        }).save();
+        
+        // Send login alert
+        await sendLoginAlert(user.telegramUid, user, ip);
         
         otpStore.delete(`login_${number}`);
         
         res.json({ 
             success: true,
-            token,
+            token: jwtToken,
+            sessionToken,
             user: { 
                 number: user.number, 
                 balance: user.balance, 
@@ -667,6 +698,34 @@ app.post('/api/auth/resend-otp', async (req, res) => {
         res.json({ success: true, msg: 'OTP resent' });
     } catch(err) {
         res.status(500).json({ success: false, msg: 'Failed to resend' });
+    }
+});
+
+// ==================== LOGOUT ROUTES ====================
+
+// Logout from current device
+app.post('/api/user/logout-current', authMiddleware, async (req, res) => {
+    try {
+        // Delete current session
+        await Session.findOneAndDelete({ token: req.token });
+        
+        res.json({ success: true, msg: 'Logged out from current device' });
+    } catch(err) {
+        console.error('Logout error:', err);
+        res.status(500).json({ success: false, msg: 'Logout failed' });
+    }
+});
+
+// Logout from all devices
+app.post('/api/user/logout-all', authMiddleware, async (req, res) => {
+    try {
+        // Delete all sessions for this user
+        await Session.deleteMany({ userId: req.userId });
+        
+        res.json({ success: true, msg: 'Logged out from all devices' });
+    } catch(err) {
+        console.error('Logout all error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to logout from all devices' });
     }
 });
 
@@ -744,13 +803,17 @@ app.get('/api/user/dashboard', authMiddleware, async (req, res) => {
             claimedNumbers: { $ne: user.number }
         });
         
+        // Get active sessions count
+        const activeSessions = await Session.countDocuments({ userId: user._id });
+        
         res.json({ 
             success: true,
             balance: user.balance,
             username: user.username,
             number: user.number,
             telegramUid: user.telegramUid,
-            unclaimedLifafas: unclaimedCount
+            unclaimedLifafas: unclaimedCount,
+            activeSessions
         });
     } catch(err) {
         res.status(500).json({ success: false, msg: 'Error loading dashboard' });
@@ -764,6 +827,7 @@ app.get('/api/user/profile', authMiddleware, async (req, res) => {
         const totalLifafasCreated = await Lifafa.countDocuments({ createdBy: user._id });
         const totalLifafasClaimed = await Lifafa.countDocuments({ claimedBy: user._id });
         const totalTransactions = await Transaction.countDocuments({ userId: user._id });
+        const activeSessions = await Session.countDocuments({ userId: user._id });
         
         res.json({
             success: true,
@@ -776,6 +840,7 @@ app.get('/api/user/profile', authMiddleware, async (req, res) => {
                 lastLogin: user.lastLogin,
                 isBlocked: user.isBlocked,
                 blockedNumbers: user.blockedNumbers || [],
+                activeSessions,
                 stats: {
                     lifafasCreated: totalLifafasCreated,
                     lifafasClaimed: totalLifafasClaimed,
@@ -1724,6 +1789,41 @@ app.get('/api/admin/users', adminMiddleware, async (req, res) => {
     }
 });
 
+// Get all active sessions count
+app.get('/api/admin/active-sessions', adminMiddleware, async (req, res) => {
+    try {
+        const totalSessions = await Session.countDocuments();
+        const uniqueUsers = await Session.distinct('userId');
+        
+        res.json({
+            success: true,
+            totalSessions,
+            uniqueUsers: uniqueUsers.length
+        });
+    } catch(err) {
+        res.status(500).json({ success: false, msg: 'Error fetching sessions' });
+    }
+});
+
+// Logout all users from all devices
+app.post('/api/admin/logout-all-users', adminMiddleware, async (req, res) => {
+    try {
+        // Delete all sessions
+        const deletedCount = (await Session.deleteMany({})).deletedCount;
+        
+        await createAdminLog(req.adminId, 'logout_all_users', { sessionsCleared: deletedCount }, req);
+        
+        res.json({ 
+            success: true, 
+            msg: `All users logged out from all devices`,
+            sessionsCleared: deletedCount
+        });
+    } catch(err) {
+        console.error('Logout all users error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to logout all users' });
+    }
+});
+
 // Get single user details
 app.get('/api/admin/user/:userId', adminMiddleware, async (req, res) => {
     try {
@@ -1764,24 +1864,28 @@ app.get('/api/admin/user/:userId', adminMiddleware, async (req, res) => {
     }
 });
 
-// Logout user from all devices
-app.post('/api/admin/logout-user', adminMiddleware, async (req, res) => {
+// Logout user from all devices (admin)
+app.post('/api/admin/logout-user-all', adminMiddleware, async (req, res) => {
     try {
         const { userId } = req.body;
         
+        if (!userId) {
+            return res.json({ success: false, msg: 'User ID required' });
+        }
+        
         // Delete all sessions for this user
-        await Session.deleteMany({ userId });
+        const deletedCount = (await Session.deleteMany({ userId })).deletedCount;
         
-        await createAdminLog(req.adminId, 'logout_user', { userId }, req);
+        await createAdminLog(req.adminId, 'logout_user_all', { userId, sessionsCleared: deletedCount }, req);
         
-        res.json({ success: true, msg: 'User logged out from all devices' });
+        res.json({ success: true, msg: `User logged out from all devices`, sessionsCleared: deletedCount });
     } catch(err) {
-        console.error('Logout user error:', err);
-        res.status(500).json({ success: false, msg: 'Failed to logout user' });
+        console.error('Logout user all error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to logout user from all devices' });
     }
 });
 
-// FIXED: Create account without OTP
+// Create account without OTP - Allow multiple accounts with same Telegram ID
 app.post('/api/admin/create-account', adminMiddleware, async (req, res) => {
     try {
         const { username, number, telegramUid, password } = req.body;
@@ -1808,7 +1912,7 @@ app.post('/api/admin/create-account', adminMiddleware, async (req, res) => {
             return res.json({ success: false, msg: 'Number already registered' });
         }
         
-        // Allow multiple accounts with same Telegram ID (no check)
+        // Allow multiple accounts with same Telegram ID - removed the check
         
         const hashedPassword = bcrypt.hashSync(password, 10);
         
@@ -1839,13 +1943,6 @@ app.post('/api/admin/login-as-user', adminMiddleware, async (req, res) => {
         if (!user) {
             return res.json({ success: false, msg: 'User not found' });
         }
-        
-        // Create session
-        const session = new Session({
-            userId: user._id,
-            adminId: req.adminId
-        });
-        await session.save();
         
         // Create JWT for user
         const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
@@ -1953,16 +2050,22 @@ app.post('/api/admin/block-user', adminMiddleware, async (req, res) => {
     }
 });
 
+// ✅ FIXED: Delete user with proper error handling
 app.post('/api/admin/delete-user', adminMiddleware, async (req, res) => {
     try {
-        const { userId, number, reason } = req.body;
+        const { userId, reason } = req.body;
         
+        if (!userId) {
+            return res.json({ success: false, msg: 'User ID required' });
+        }
+        
+        // Find user first
         const user = await User.findById(userId);
         if (!user) {
             return res.json({ success: false, msg: 'User not found' });
         }
         
-        await createAdminLog(req.adminId, 'delete_user', { number: user.number, username: user.username, reason }, req);
+        console.log(`🗑️ Deleting user: ${user.username} (${user.number})`);
         
         // Delete user's sessions
         await Session.deleteMany({ userId: user._id });
@@ -1973,12 +2076,25 @@ app.post('/api/admin/delete-user', adminMiddleware, async (req, res) => {
         // Delete user's withdrawals
         await Withdrawal.deleteMany({ userId: user._id });
         
-        // Delete user
+        // Delete user's lifafas (optional - you might want to keep them)
+        // await Lifafa.deleteMany({ createdBy: user._id });
+        
+        // Create log before deletion
+        await createAdminLog(req.adminId, 'delete_user', { 
+            number: user.number, 
+            username: user.username, 
+            reason 
+        }, req);
+        
+        // Delete the user
         await User.findByIdAndDelete(userId);
         
-        res.json({ success: true, msg: 'User deleted' });
+        console.log(`✅ User deleted successfully: ${user.username}`);
+        
+        res.json({ success: true, msg: 'User deleted successfully' });
     } catch(err) {
-        res.status(500).json({ success: false, msg: 'Failed to delete user' });
+        console.error('❌ Delete user error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to delete user: ' + err.message });
     }
 });
 
@@ -2443,7 +2559,9 @@ const server = app.listen(PORT, () => {
     console.log(`🛡️ Security middleware enabled`);
     console.log(`✅ Channel verification system active`);
     console.log(`✅ TXN ID generation enabled`);
-    console.log(`✅ Admin create account fixed`);
+    console.log(`✅ Session tracking enabled`);
+    console.log(`✅ Admin create account fixed (multiple accounts allowed)`);
+    console.log(`✅ Delete user error fixed`);
     console.log(`✅ Pay to user shows username instead of number`);
     
     setTimeout(async () => {
