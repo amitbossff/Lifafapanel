@@ -241,6 +241,8 @@ const TransactionSchema = new mongoose.Schema({
     },
     amount: { type: Number, required: true },
     description: String,
+    senderInfo: { type: String }, // For pay_sent, store receiver info
+    receiverInfo: { type: String }, // For pay_received, store sender info
     createdAt: { type: Date, default: Date.now, index: true }
 });
 
@@ -809,6 +811,7 @@ app.get('/api/user/transactions', authMiddleware, async (req, res) => {
     }
 });
 
+// UPDATED: Pay to user with sender username instead of number
 app.post('/api/user/pay', authMiddleware, async (req, res) => {
     try {
         const { receiverNumber, amount } = req.body;
@@ -850,13 +853,14 @@ app.post('/api/user/pay', authMiddleware, async (req, res) => {
         await sender.save();
         await receiver.save();
         
-        // Create transactions
+        // Create transactions with sender username instead of number
         await new Transaction({
             txnId: txnIdSent,
             userId: sender._id,
             type: 'pay_sent',
             amount,
-            description: `Paid to ${receiverNumber}`
+            description: `Paid to ${receiver.username}`,
+            receiverInfo: receiver.username
         }).save();
         
         await new Transaction({
@@ -864,17 +868,18 @@ app.post('/api/user/pay', authMiddleware, async (req, res) => {
             userId: receiver._id,
             type: 'pay_received',
             amount,
-            description: `Received from ${sender.number}`
+            description: `Received from ${sender.username}`,
+            senderInfo: sender.username
         }).save();
         
-        // Send notifications
+        // Send notifications with usernames
         if (bot) {
             await bot.sendMessage(sender.telegramUid, 
-                `💸 *Payment Sent*\n\nTXN ID: \`${txnIdSent}\`\nAmount: ₹${amount}\nTo: ${receiverNumber}\nBalance: ₹${sender.balance}`,
+                `💸 *Payment Sent*\n\nTXN ID: \`${txnIdSent}\`\nAmount: ₹${amount}\nTo: ${receiver.username}\nBalance: ₹${sender.balance}`,
                 { parse_mode: 'Markdown' }
             );
             await bot.sendMessage(receiver.telegramUid,
-                `💰 *Payment Received*\n\nTXN ID: \`${txnIdReceived}\`\nAmount: ₹${amount}\nFrom: ${sender.number}\nBalance: ₹${receiver.balance}`,
+                `💰 *Payment Received*\n\nTXN ID: \`${txnIdReceived}\`\nAmount: ₹${amount}\nFrom: ${sender.username}\nBalance: ₹${receiver.balance}`,
                 { parse_mode: 'Markdown' }
             );
         }
@@ -883,7 +888,8 @@ app.post('/api/user/pay', authMiddleware, async (req, res) => {
             success: true, 
             msg: 'Payment successful',
             txnId: txnIdSent,
-            newBalance: sender.balance
+            newBalance: sender.balance,
+            receiverName: receiver.username
         });
         
     } catch(err) {
@@ -1017,7 +1023,7 @@ app.post('/api/user/unban-number', authMiddleware, async (req, res) => {
     }
 });
 
-// ==================== UNCLAIMED LIFAFAS ====================
+// ==================== UNCLAIMED LIFAFAS WITH CHANNEL STATUS ====================
 
 app.post('/api/user/unclaimed-lifafas', authMiddleware, async (req, res) => {
     try {
@@ -1040,26 +1046,46 @@ app.post('/api/user/unclaimed-lifafas', authMiddleware, async (req, res) => {
             return !user.blockedNumbers.includes(l.createdBy?.toString());
         });
         
-        res.json({ 
-            success: true,
-            lifafas: filteredLifafas.map(l => ({
+        // For each lifafa, check if user has already joined channels
+        const lifafasWithStatus = await Promise.all(filteredLifafas.map(async (l) => {
+            let channelStatus = 'unknown';
+            let missingChannels = [];
+            
+            // Check channel membership if lifafa has channels
+            if (l.channelRequired && l.channels && l.channels.length > 0) {
+                const verification = await checkChannelMembership(user.telegramUid, l.channels);
+                channelStatus = verification.success ? 'verified' : 'pending';
+                missingChannels = verification.missingChannels || [];
+            } else {
+                channelStatus = 'not_required';
+            }
+            
+            return {
                 _id: l._id,
                 title: l.title,
                 amount: l.amount,
                 code: l.code,
                 channels: l.channels || [],
                 channelRequired: l.channelRequired || false,
+                channelStatus: channelStatus,
+                missingChannels: missingChannels,
                 totalUsers: l.totalUsers || 1,
                 claimedCount: l.claimedCount || 0
-            }))
+            };
+        }));
+        
+        res.json({ 
+            success: true,
+            lifafas: lifafasWithStatus
         });
         
     } catch(err) {
+        console.error('Unclaimed lifafas error:', err);
         res.status(500).json({ success: false, msg: 'Failed to fetch lifafas' });
     }
 });
 
-// ==================== CLAIM LIFAFAS ====================
+// ==================== CLAIM LIFAFAS WITH CHANNEL VERIFICATION ====================
 
 app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
     try {
@@ -1092,9 +1118,11 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
             return res.json({ success: false, msg: 'Already claimed' });
         }
         
-        // Check channel verification
+        // Check channel verification if required
         if (lifafa.channelRequired && lifafa.channels && lifafa.channels.length > 0) {
+            // Verify channel membership via Telegram
             const verification = await checkChannelMembership(user.telegramUid, lifafa.channels);
+            
             if (!verification.success) {
                 return res.json({ 
                     success: false, 
@@ -1109,7 +1137,7 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
         if (lifafa.claimedCount >= totalAllowed) {
             lifafa.isActive = false;
             await lifafa.save();
-            return res.json({ success: false, msg: 'Fully claimed' });
+            return res.json({ success: false, msg: 'This lifafa is fully claimed' });
         }
         
         // Process claim
@@ -1134,7 +1162,7 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
             userId: user._id,
             type: 'lifafa_claimed',
             amount: lifafa.amount,
-            description: `Claimed lifafa: ${lifafa.title}`
+            description: `Claimed Lifafa: ${lifafa.title}`
         }).save();
         
         if (bot) {
@@ -1144,10 +1172,16 @@ app.post('/api/user/claim-lifafa', authMiddleware, async (req, res) => {
             );
         }
         
-        res.json({ success: true, amount: lifafa.amount, newBalance: user.balance, txnId });
+        res.json({ 
+            success: true, 
+            amount: lifafa.amount, 
+            newBalance: user.balance, 
+            txnId,
+            channelStatus: 'verified'
+        });
         
     } catch(err) {
-        console.error('Claim error:', err);
+        console.error('Claim lifafa error:', err);
         res.status(500).json({ success: false, msg: 'Claim failed' });
     }
 });
@@ -1176,24 +1210,40 @@ app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
         }
         
         // CHECK ALL CHANNELS FIRST
+        let allChannelsVerified = true;
+        let allMissingChannels = [];
+        
         for (const lifafa of lifafas) {
             if (lifafa.channelRequired && lifafa.channels && lifafa.channels.length > 0) {
                 const verification = await checkChannelMembership(user.telegramUid, lifafa.channels);
+                
                 if (!verification.success) {
-                    return res.json({ 
-                        success: false, 
-                        msg: `Channel verification failed for ${lifafa.title}`,
-                        missingChannels: verification.missingChannels,
-                        lifafaCode: lifafa.code
-                    });
+                    allChannelsVerified = false;
+                    allMissingChannels = [...allMissingChannels, ...verification.missingChannels];
                 }
             }
         }
         
+        // If any channel verification failed, return the missing channels
+        if (!allChannelsVerified) {
+            // Remove duplicates from missing channels
+            const uniqueMissingChannels = [...new Set(allMissingChannels)];
+            
+            return res.json({ 
+                success: false, 
+                msg: 'Channel verification failed for some lifafas',
+                missingChannels: uniqueMissingChannels
+            });
+        }
+        
+        // ALL CHANNELS VERIFIED - Proceed with claiming
         let totalAmount = 0;
+        const claimedLifafas = [];
+        const txnIds = [];
         
         for (const lifafa of lifafas) {
             totalAmount += lifafa.amount;
+            claimedLifafas.push(lifafa.title);
             
             lifafa.claimedBy.push(user._id);
             lifafa.claimedNumbers.push(number);
@@ -1206,15 +1256,26 @@ app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
             }
             
             await lifafa.save();
+            
+            const txnId = generateTxnId('CLM');
+            txnIds.push(txnId);
+            
+            await new Transaction({
+                txnId,
+                userId: user._id,
+                type: 'lifafa_claimed',
+                amount: lifafa.amount,
+                description: `Claimed lifafa: ${lifafa.title}`
+            }).save();
         }
         
         user.balance += totalAmount;
         await user.save();
         
-        const txnId = generateTxnId('BLK');
+        const bulkTxnId = generateTxnId('BLK');
         
         await new Transaction({
-            txnId,
+            txnId: bulkTxnId,
             userId: user._id,
             type: 'lifafa_claimed',
             amount: totalAmount,
@@ -1223,7 +1284,11 @@ app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
         
         if (bot) {
             await bot.sendMessage(user.telegramUid,
-                `🎊 *Bulk Claim Successful!*\n\nTXN ID: \`${txnId}\`\nTotal Lifafas: ${lifafas.length}\nTotal Amount: +₹${totalAmount}\nNew Balance: ₹${user.balance}`,
+                `🎊 *Bulk Claim Successful!*\n\n` +
+                `Total Lifafas: ${lifafas.length}\n` +
+                `Total Amount: +₹${totalAmount}\n` +
+                `New Balance: ₹${user.balance}\n` +
+                `Bulk TXN: \`${bulkTxnId}\``,
                 { parse_mode: 'Markdown' }
             );
         }
@@ -1233,7 +1298,8 @@ app.post('/api/user/claim-all-lifafas', authMiddleware, async (req, res) => {
             totalLifafas: lifafas.length, 
             totalAmount, 
             newBalance: user.balance,
-            txnId
+            txnId: bulkTxnId,
+            channelStatus: 'all_verified'
         });
         
     } catch(err) {
@@ -1464,7 +1530,7 @@ app.post('/api/lifafa/claim', async (req, res) => {
             return res.json({ success: false, msg: 'Already claimed' });
         }
         
-        // Check channel verification
+        // Check channel verification if required
         if (lifafa.channelRequired && lifafa.channels && lifafa.channels.length > 0) {
             const verification = await checkChannelMembership(user.telegramUid, lifafa.channels);
             if (!verification.success) {
@@ -1636,6 +1702,7 @@ app.get('/api/admin/users', adminMiddleware, async (req, res) => {
     }
 });
 
+// FIXED: Create account without OTP
 app.post('/api/admin/create-account', adminMiddleware, async (req, res) => {
     try {
         const { username, number, telegramUid, password } = req.body;
@@ -1644,13 +1711,26 @@ app.post('/api/admin/create-account', adminMiddleware, async (req, res) => {
             return res.json({ success: false, msg: 'All fields required' });
         }
         
+        if (!/^\d{10}$/.test(number)) {
+            return res.json({ success: false, msg: 'Invalid number format' });
+        }
+        
+        if (username.length < 3) {
+            return res.json({ success: false, msg: 'Username must be at least 3 characters' });
+        }
+        
+        if (password.length < 6) {
+            return res.json({ success: false, msg: 'Password must be at least 6 characters' });
+        }
+        
         // Check if number exists
         const existingUser = await User.findOne({ number });
         if (existingUser) {
             return res.json({ success: false, msg: 'Number already registered' });
         }
         
-        // Allow multiple accounts with same Telegram ID
+        // Allow multiple accounts with same Telegram ID (no check)
+        
         const hashedPassword = bcrypt.hashSync(password, 10);
         
         const user = new User({
@@ -1667,7 +1747,65 @@ app.post('/api/admin/create-account', adminMiddleware, async (req, res) => {
         
         res.json({ success: true, msg: 'Account created', user: { username, number, telegramUid } });
     } catch(err) {
-        res.status(500).json({ success: false, msg: 'Failed to create account' });
+        console.error('Create account error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to create account: ' + err.message });
+    }
+});
+
+// Get single user details
+app.get('/api/admin/user/:userId', adminMiddleware, async (req, res) => {
+    try {
+        const { userId } = req.params;
+        
+        const user = await User.findById(userId).select('-password');
+        if (!user) {
+            return res.json({ success: false, msg: 'User not found' });
+        }
+        
+        // Get user stats
+        const totalLifafasCreated = await Lifafa.countDocuments({ createdBy: userId });
+        const totalLifafasClaimed = await Lifafa.countDocuments({ claimedBy: userId });
+        const totalTransactions = await Transaction.countDocuments({ userId });
+        const recentTransactions = await Transaction.find({ userId })
+            .sort('-createdAt')
+            .limit(10);
+        const withdrawals = await Withdrawal.find({ userId })
+            .sort('-createdAt')
+            .limit(10);
+        const activeSessions = await Session.countDocuments({ userId });
+        
+        res.json({
+            success: true,
+            user,
+            stats: {
+                lifafasCreated: totalLifafasCreated,
+                lifafasClaimed: totalLifafasClaimed,
+                transactions: totalTransactions
+            },
+            recentTransactions,
+            withdrawals,
+            activeSessions
+        });
+    } catch(err) {
+        console.error('Get user details error:', err);
+        res.status(500).json({ success: false, msg: 'Error loading user details' });
+    }
+});
+
+// Logout user from all devices
+app.post('/api/admin/logout-user', adminMiddleware, async (req, res) => {
+    try {
+        const { userId } = req.body;
+        
+        // Delete all sessions for this user
+        await Session.deleteMany({ userId });
+        
+        await createAdminLog(req.adminId, 'logout_user', { userId }, req);
+        
+        res.json({ success: true, msg: 'User logged out from all devices' });
+    } catch(err) {
+        console.error('Logout user error:', err);
+        res.status(500).json({ success: false, msg: 'Failed to logout user' });
     }
 });
 
@@ -1803,6 +1941,9 @@ app.post('/api/admin/delete-user', adminMiddleware, async (req, res) => {
         }
         
         await createAdminLog(req.adminId, 'delete_user', { number: user.number, username: user.username, reason }, req);
+        
+        // Delete user's sessions
+        await Session.deleteMany({ userId: user._id });
         
         // Delete user's transactions
         await Transaction.deleteMany({ userId: user._id });
@@ -2280,6 +2421,8 @@ const server = app.listen(PORT, () => {
     console.log(`🛡️ Security middleware enabled`);
     console.log(`✅ Channel verification system active`);
     console.log(`✅ TXN ID generation enabled`);
+    console.log(`✅ Admin create account fixed`);
+    console.log(`✅ Pay to user shows username instead of number`);
     
     setTimeout(async () => {
         try {
